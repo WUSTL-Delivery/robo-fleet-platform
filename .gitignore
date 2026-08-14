@@ -1,0 +1,12 @@
+# build artifacts
+server/bin/
+*.test
+
+# runtime state
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# editors / os
+.DS_Store
