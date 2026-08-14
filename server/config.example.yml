@@ -1,0 +1,15 @@
+# fleet-server bootstrap config — describes the installation, nothing else.
+# Fleets, robots, tokens, operators live in the database (managed at runtime);
+# capabilities arrive over the wire as manifests.
+
+listen: ":8080"
+db: "fleet.db"
+
+# Presence: clients heartbeat at this interval; ~2.5 missed beats => offline.
+heartbeat_interval_ms: 10000
+
+# Teleop authority: leases expire this long after grant/renew.
+lease_ttl_ms: 15000
+
+# How often the server sweeps for lapsed heartbeats and expired leases.
+sweep_ms: 1000
