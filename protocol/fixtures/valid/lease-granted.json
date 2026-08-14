@@ -1,0 +1,10 @@
+{
+  "v": 0,
+  "type": "lease.granted",
+  "payload": {
+    "lease_id": "ls_7f8e9d0c",
+    "robot_id": "r_1a2b3c4d",
+    "operator_id": "o_9c8d7e6f",
+    "expires_at_ms": 1755100033000
+  }
+}

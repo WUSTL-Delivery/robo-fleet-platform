@@ -1,0 +1,11 @@
+{
+  "v": 0,
+  "type": "manifest",
+  "payload": {
+    "drive": { "type": "twist", "max_v_mps": 1.5, "max_w_radps": 2.0 },
+    "cameras": [{ "id": "front", "label": "Front RGB" }],
+    "battery": {},
+    "channels": ["assignment", "edge_report"],
+    "behaviors": []
+  }
+}

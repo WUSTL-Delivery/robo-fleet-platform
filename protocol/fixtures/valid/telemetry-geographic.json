@@ -1,0 +1,11 @@
+{
+  "v": 0,
+  "type": "telemetry",
+  "ts_ms": 1755100001000,
+  "payload": {
+    "pose": { "frame": "geographic", "lat": 38.6488, "lon": -90.3108, "alt_m": 141.2, "yaw_rad": 1.57 },
+    "velocity": { "v_mps": 0.8, "w_radps": 0.0 },
+    "battery": { "pct": 87.5, "voltage": 24.1 },
+    "health": { "gps_fix": "rtk_fixed", "wifi_dbm": -58 }
+  }
+}

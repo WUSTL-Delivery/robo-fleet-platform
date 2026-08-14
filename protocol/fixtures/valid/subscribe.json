@@ -1,0 +1,7 @@
+{
+  "v": 0,
+  "type": "subscribe",
+  "payload": {
+    "topics": ["presence", "events", "telemetry", "channel:edge_report"]
+  }
+}

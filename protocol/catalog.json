@@ -1,0 +1,29 @@
+{
+  "v": 0,
+  "envelope": "schemas/envelope.schema.json",
+  "messages": {
+    "enroll.request": "schemas/auth.schema.json#/$defs/enroll.request",
+    "enroll.response": "schemas/auth.schema.json#/$defs/enroll.response",
+    "hello": "schemas/auth.schema.json#/$defs/hello",
+    "welcome": "schemas/auth.schema.json#/$defs/welcome",
+    "heartbeat": "schemas/auth.schema.json#/$defs/heartbeat",
+    "manifest": "schemas/robot.schema.json#/$defs/manifest",
+    "telemetry": "schemas/robot.schema.json#/$defs/telemetry",
+    "help.request": "schemas/robot.schema.json#/$defs/help.request",
+    "twist": "schemas/robot.schema.json#/$defs/twist",
+    "subscribe": "schemas/ops.schema.json#/$defs/subscribe",
+    "snapshot": "schemas/ops.schema.json#/$defs/snapshot",
+    "event": "schemas/ops.schema.json#/$defs/event",
+    "lease.claim": "schemas/ops.schema.json#/$defs/lease.claim",
+    "lease.granted": "schemas/ops.schema.json#/$defs/lease.granted",
+    "lease.renew": "schemas/ops.schema.json#/$defs/lease.renew",
+    "lease.release": "schemas/ops.schema.json#/$defs/lease.release",
+    "lease.revoked": "schemas/ops.schema.json#/$defs/lease.revoked",
+    "channel.publish": "schemas/bus.schema.json#/$defs/channel.publish",
+    "channel.message": "schemas/bus.schema.json#/$defs/channel.message",
+    "signal": "schemas/bus.schema.json#/$defs/signal",
+    "layer.declare": "schemas/bus.schema.json#/$defs/layer.declare",
+    "layer.update": "schemas/bus.schema.json#/$defs/layer.update",
+    "error": "schemas/error.schema.json#/$defs/error"
+  }
+}

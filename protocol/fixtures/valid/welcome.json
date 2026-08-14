@@ -1,0 +1,11 @@
+{
+  "v": 0,
+  "type": "welcome",
+  "payload": {
+    "client_id": "r_1a2b3c4d",
+    "fleet_id": "f_00000001",
+    "kind": "robot",
+    "server_time_ms": 1755100000123,
+    "heartbeat_interval_ms": 10000
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fleetplatform.local/v0/ops.schema.json",
+  "title": "Subscriptions, events, intervention queue, leases",
+  "$defs": {
+    "subscribe": {
+      "type": "object",
+      "properties": {
+        "topics": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_.:-]{0,79}$" }
+        }
+      },
+      "required": ["topics"],
+      "additionalProperties": false
+    },
+    "snapshot": {
+      "type": "object",
+      "properties": {
+        "robots": {
+          "type": "array",
+          "items": { "$ref": "defs.schema.json#/$defs/robotSummary" }
+        }
+      },
+      "required": ["robots"],
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "properties": {
+        "event": { "$ref": "defs.schema.json#/$defs/eventName" },
+        "robot_id": { "type": "string" },
+        "data": { "type": "object" }
+      },
+      "required": ["event"],
+      "additionalProperties": false
+    },
+    "lease.claim": {
+      "type": "object",
+      "properties": {
+        "robot_id": { "type": "string", "minLength": 1 }
+      },
+      "required": ["robot_id"],
+      "additionalProperties": false
+    },
+    "lease.granted": { "$ref": "defs.schema.json#/$defs/lease" },
+    "lease.renew": {
+      "type": "object",
+      "properties": {
+        "lease_id": { "type": "string", "minLength": 1 }
+      },
+      "required": ["lease_id"],
+      "additionalProperties": false
+    },
+    "lease.release": {
+      "type": "object",
+      "properties": {
+        "lease_id": { "type": "string", "minLength": 1 },
+        "resolution": { "enum": ["resolved", "abandoned"] }
+      },
+      "required": ["lease_id", "resolution"],
+      "additionalProperties": false
+    },
+    "lease.revoked": {
+      "type": "object",
+      "properties": {
+        "lease_id": { "type": "string", "minLength": 1 },
+        "robot_id": { "type": "string", "minLength": 1 },
+        "reason": { "enum": ["released", "expired", "stolen", "operator_lost"] }
+      },
+      "required": ["lease_id", "robot_id", "reason"],
+      "additionalProperties": false
+    }
+  }
+}

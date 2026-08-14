@@ -1,0 +1,10 @@
+{
+  "v": 0,
+  "type": "twist",
+  "ts_ms": 1755100003000,
+  "payload": {
+    "lease_id": "ls_7f8e9d0c",
+    "linear": { "x_mps": 0.5 },
+    "angular": { "z_radps": -0.3 }
+  }
+}

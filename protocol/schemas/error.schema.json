@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fleetplatform.local/v0/error.schema.json",
+  "title": "Server error reply",
+  "$defs": {
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "auth_failed",
+            "invalid_message",
+            "not_found",
+            "not_authorized",
+            "conflict",
+            "rate_limited"
+          ]
+        },
+        "message": { "type": "string", "maxLength": 512 },
+        "ref": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["code", "message"],
+      "additionalProperties": false
+    }
+  }
+}

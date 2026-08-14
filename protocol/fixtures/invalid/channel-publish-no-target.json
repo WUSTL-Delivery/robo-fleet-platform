@@ -1,0 +1,8 @@
+{
+  "v": 0,
+  "type": "channel.publish",
+  "payload": {
+    "channel": "assignment",
+    "data": { "seq": 1 }
+  }
+}

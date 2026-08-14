@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fleetplatform.local/v0/envelope.schema.json",
+  "title": "Message envelope",
+  "type": "object",
+  "properties": {
+    "v": { "const": 0 },
+    "type": { "type": "string", "pattern": "^[a-z][a-z0-9_.]{0,63}$" },
+    "id": { "type": "string", "maxLength": 64 },
+    "ts_ms": { "type": "integer" },
+    "payload": { "type": "object" }
+  },
+  "required": ["v", "type", "payload"],
+  "additionalProperties": false
+}

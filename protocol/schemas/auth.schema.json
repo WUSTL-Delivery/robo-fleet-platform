@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fleetplatform.local/v0/auth.schema.json",
+  "title": "Enrollment, authentication, liveness",
+  "$defs": {
+    "enroll.request": {
+      "type": "object",
+      "properties": {
+        "enrollment_key": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["robot", "service"] },
+        "name": { "type": "string", "maxLength": 64 },
+        "agent": { "$ref": "#/$defs/agentInfo" }
+      },
+      "required": ["enrollment_key", "kind"],
+      "additionalProperties": false
+    },
+    "enroll.response": {
+      "type": "object",
+      "properties": {
+        "token": { "type": "string", "minLength": 1 },
+        "client_id": { "type": "string", "minLength": 1 },
+        "fleet_id": { "type": "string", "minLength": 1 }
+      },
+      "required": ["token", "client_id", "fleet_id"],
+      "additionalProperties": false
+    },
+    "hello": {
+      "type": "object",
+      "properties": {
+        "token": { "type": "string", "minLength": 1 },
+        "agent": { "$ref": "#/$defs/agentInfo" }
+      },
+      "required": ["token"],
+      "additionalProperties": false
+    },
+    "welcome": {
+      "type": "object",
+      "properties": {
+        "client_id": { "type": "string", "minLength": 1 },
+        "fleet_id": { "type": "string", "minLength": 1 },
+        "kind": { "$ref": "defs.schema.json#/$defs/clientKind" },
+        "server_time_ms": { "type": "integer" },
+        "heartbeat_interval_ms": { "type": "integer", "exclusiveMinimum": 0 }
+      },
+      "required": ["client_id", "fleet_id", "kind", "server_time_ms", "heartbeat_interval_ms"],
+      "additionalProperties": false
+    },
+    "heartbeat": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "agentInfo": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 64 },
+        "version": { "type": "string", "maxLength": 32 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

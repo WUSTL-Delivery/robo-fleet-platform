@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fleetplatform.local/v0/bus.schema.json",
+  "title": "Opaque domain channels, WebRTC signaling, map layers",
+  "$defs": {
+    "channel.publish": {
+      "type": "object",
+      "properties": {
+        "channel": { "$ref": "defs.schema.json#/$defs/channelName" },
+        "to": { "type": "string", "minLength": 1 },
+        "broadcast": { "const": true },
+        "data": true
+      },
+      "required": ["channel", "data"],
+      "oneOf": [
+        { "required": ["to"] },
+        { "required": ["broadcast"] }
+      ],
+      "additionalProperties": false
+    },
+    "channel.message": {
+      "type": "object",
+      "properties": {
+        "channel": { "$ref": "defs.schema.json#/$defs/channelName" },
+        "from": { "type": "string", "minLength": 1 },
+        "data": true
+      },
+      "required": ["channel", "from", "data"],
+      "additionalProperties": false
+    },
+    "signal": {
+      "type": "object",
+      "description": "WebRTC signaling relay. Sender sets `to`; the server stamps `from` on delivery.",
+      "properties": {
+        "to": { "type": "string", "minLength": 1 },
+        "from": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["offer", "answer", "ice"] },
+        "data": true
+      },
+      "required": ["kind", "data"],
+      "additionalProperties": false
+    },
+    "layer.declare": {
+      "type": "object",
+      "properties": {
+        "layer_id": { "$ref": "defs.schema.json#/$defs/channelName" },
+        "kind": { "const": "geojson" },
+        "title": { "type": "string", "maxLength": 128 },
+        "style": { "type": "object" }
+      },
+      "required": ["layer_id", "kind"],
+      "additionalProperties": false
+    },
+    "layer.update": {
+      "type": "object",
+      "properties": {
+        "layer_id": { "$ref": "defs.schema.json#/$defs/channelName" },
+        "data": true
+      },
+      "required": ["layer_id", "data"],
+      "additionalProperties": false
+    }
+  }
+}

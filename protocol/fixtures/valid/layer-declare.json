@@ -1,0 +1,10 @@
+{
+  "v": 0,
+  "type": "layer.declare",
+  "payload": {
+    "layer_id": "graph",
+    "kind": "geojson",
+    "title": "Waypoint graph",
+    "style": { "line-color-by": "properties.eta_band" }
+  }
+}

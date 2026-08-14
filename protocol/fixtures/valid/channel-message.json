@@ -1,0 +1,9 @@
+{
+  "v": 0,
+  "type": "channel.message",
+  "payload": {
+    "channel": "edge_report",
+    "from": "r_1a2b3c4d",
+    "data": [1, "any", { "json": true }]
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "v": 0,
+  "type": "lease.revoked",
+  "payload": {
+    "lease_id": "ls_7f8e9d0c",
+    "robot_id": "r_1a2b3c4d",
+    "reason": "because"
+  }
+}

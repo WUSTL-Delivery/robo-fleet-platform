@@ -1,0 +1,9 @@
+{
+  "v": 0,
+  "type": "channel.publish",
+  "payload": {
+    "channel": "assignment",
+    "to": "r_1a2b3c4d",
+    "data": { "opaque": "domain payload — platform never inspects this", "seq": 42 }
+  }
+}

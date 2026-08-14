@@ -1,0 +1,23 @@
+{
+  "v": 0,
+  "type": "snapshot",
+  "payload": {
+    "robots": [
+      {
+        "robot_id": "r_1a2b3c4d",
+        "name": "sim-01",
+        "presence": "online",
+        "state": "HELP_REQUESTED",
+        "manifest": {
+          "drive": { "type": "twist", "max_v_mps": 1.5, "max_w_radps": 2.0 },
+          "battery": {}
+        }
+      },
+      {
+        "robot_id": "r_5e6f7a8b",
+        "presence": "offline",
+        "state": "AUTONOMOUS"
+      }
+    ]
+  }
+}

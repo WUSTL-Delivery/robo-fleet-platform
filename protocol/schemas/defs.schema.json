@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fleetplatform.local/v0/defs.schema.json",
+  "title": "Shared definitions",
+  "$defs": {
+    "clientKind": { "enum": ["robot", "service", "operator"] },
+    "robotState": { "enum": ["AUTONOMOUS", "HELP_REQUESTED", "TELEOP"] },
+    "presence": { "enum": ["online", "offline"] },
+    "pose": {
+      "oneOf": [
+        { "$ref": "#/$defs/geoPose" },
+        { "$ref": "#/$defs/localPose" }
+      ]
+    },
+    "geoPose": {
+      "type": "object",
+      "properties": {
+        "frame": { "const": "geographic" },
+        "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+        "lon": { "type": "number", "minimum": -180, "maximum": 180 },
+        "alt_m": { "type": "number" },
+        "yaw_rad": { "type": "number" }
+      },
+      "required": ["frame", "lat", "lon"],
+      "additionalProperties": false
+    },
+    "localPose": {
+      "type": "object",
+      "properties": {
+        "frame": { "const": "local" },
+        "frame_id": { "type": "string" },
+        "x_m": { "type": "number" },
+        "y_m": { "type": "number" },
+        "z_m": { "type": "number" },
+        "yaw_rad": { "type": "number" }
+      },
+      "required": ["frame", "x_m", "y_m"],
+      "additionalProperties": false
+    },
+    "manifest": {
+      "type": "object",
+      "properties": {
+        "drive": {
+          "type": "object",
+          "properties": {
+            "type": { "const": "twist" },
+            "max_v_mps": { "type": "number", "exclusiveMinimum": 0 },
+            "max_w_radps": { "type": "number", "exclusiveMinimum": 0 }
+          },
+          "required": ["type", "max_v_mps", "max_w_radps"],
+          "additionalProperties": false
+        },
+        "cameras": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "label": { "type": "string" }
+            },
+            "required": ["id"],
+            "additionalProperties": false
+          }
+        },
+        "battery": { "type": "object", "additionalProperties": false },
+        "channels": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/channelName" }
+        },
+        "behaviors": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "lease": {
+      "type": "object",
+      "properties": {
+        "lease_id": { "type": "string", "minLength": 1 },
+        "robot_id": { "type": "string", "minLength": 1 },
+        "operator_id": { "type": "string", "minLength": 1 },
+        "expires_at_ms": { "type": "integer" }
+      },
+      "required": ["lease_id", "robot_id", "operator_id", "expires_at_ms"],
+      "additionalProperties": false
+    },
+    "robotSummary": {
+      "type": "object",
+      "properties": {
+        "robot_id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "presence": { "$ref": "#/$defs/presence" },
+        "state": { "$ref": "#/$defs/robotState" },
+        "manifest": { "$ref": "#/$defs/manifest" },
+        "lease": { "$ref": "#/$defs/lease" }
+      },
+      "required": ["robot_id", "presence", "state"],
+      "additionalProperties": false
+    },
+    "channelName": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
+    },
+    "eventName": {
+      "enum": [
+        "robot.online",
+        "robot.offline",
+        "robot.telemetry",
+        "robot.help_requested",
+        "robot.lease_granted",
+        "robot.lease_released",
+        "robot.lease_revoked"
+      ]
+    }
+  }
+}

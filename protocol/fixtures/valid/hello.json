@@ -1,0 +1,9 @@
+{
+  "v": 0,
+  "type": "hello",
+  "ts_ms": 1755100000000,
+  "payload": {
+    "token": "fp-tk-EXAMPLE_TOKEN_NOT_REAL",
+    "agent": { "name": "fleet_agent", "version": "0.1.0" }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "v": 0,
+  "type": "twist",
+  "payload": {
+    "linear": { "x_mps": 0.5 },
+    "angular": { "z_radps": 0.0 }
+  }
+}

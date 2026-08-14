@@ -1,0 +1,9 @@
+{
+  "v": 0,
+  "type": "enroll.response",
+  "payload": {
+    "token": "fp-tk-EXAMPLE_TOKEN_NOT_REAL",
+    "client_id": "r_1a2b3c4d",
+    "fleet_id": "f_00000001"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "v": 0,
+  "type": "signal",
+  "payload": {
+    "to": "r_1a2b3c4d",
+    "kind": "offer",
+    "data": { "type": "offer", "sdp": "v=0\r\no=- 46117 2 IN IP4 127.0.0.1\r\n..." }
+  }
+}

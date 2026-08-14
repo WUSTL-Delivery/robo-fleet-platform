@@ -1,0 +1,10 @@
+{
+  "v": 0,
+  "type": "enroll.request",
+  "payload": {
+    "enrollment_key": "fp-ek-EXAMPLE_KEY_NOT_REAL",
+    "kind": "robot",
+    "name": "sim-01",
+    "agent": { "name": "fleet_agent", "version": "0.1.0" }
+  }
+}

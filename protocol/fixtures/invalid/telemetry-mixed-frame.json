@@ -1,0 +1,7 @@
+{
+  "v": 0,
+  "type": "telemetry",
+  "payload": {
+    "pose": { "frame": "geographic", "lat": 38.6, "lon": -90.3, "x_m": 1.0 }
+  }
+}

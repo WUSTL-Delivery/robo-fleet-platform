@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fleetplatform.local/v0/robot.schema.json",
+  "title": "Robot-originated messages and the twist setpoint",
+  "$defs": {
+    "manifest": { "$ref": "defs.schema.json#/$defs/manifest" },
+    "telemetry": {
+      "type": "object",
+      "properties": {
+        "pose": { "$ref": "defs.schema.json#/$defs/pose" },
+        "velocity": {
+          "type": "object",
+          "properties": {
+            "v_mps": { "type": "number" },
+            "w_radps": { "type": "number" }
+          },
+          "additionalProperties": false
+        },
+        "battery": {
+          "type": "object",
+          "properties": {
+            "pct": { "type": "number", "minimum": 0, "maximum": 100 },
+            "voltage": { "type": "number" }
+          },
+          "additionalProperties": false
+        },
+        "health": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean"] }
+        }
+      },
+      "additionalProperties": false
+    },
+    "help.request": {
+      "type": "object",
+      "properties": {
+        "reason": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "context": { "type": "object" }
+      },
+      "required": ["reason"],
+      "additionalProperties": false
+    },
+    "twist": {
+      "type": "object",
+      "properties": {
+        "lease_id": { "type": "string", "minLength": 1 },
+        "linear": {
+          "type": "object",
+          "properties": {
+            "x_mps": { "type": "number" },
+            "y_mps": { "type": "number" }
+          },
+          "required": ["x_mps"],
+          "additionalProperties": false
+        },
+        "angular": {
+          "type": "object",
+          "properties": {
+            "z_radps": { "type": "number" }
+          },
+          "required": ["z_radps"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["lease_id", "linear", "angular"],
+      "additionalProperties": false
+    }
+  }
+}

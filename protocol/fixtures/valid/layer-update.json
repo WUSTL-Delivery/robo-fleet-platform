@@ -1,0 +1,8 @@
+{
+  "v": 0,
+  "type": "layer.update",
+  "payload": {
+    "layer_id": "graph",
+    "data": { "type": "FeatureCollection", "features": [] }
+  }
+}

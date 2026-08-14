@@ -1,0 +1,9 @@
+{
+  "v": 0,
+  "type": "help.request",
+  "ts_ms": 1755100002000,
+  "payload": {
+    "reason": "nav_goal_failed",
+    "context": { "attempts": 3 }
+  }
+}

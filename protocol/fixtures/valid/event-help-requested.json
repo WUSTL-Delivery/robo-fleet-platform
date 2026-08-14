@@ -1,0 +1,10 @@
+{
+  "v": 0,
+  "type": "event",
+  "ts_ms": 1755100002001,
+  "payload": {
+    "event": "robot.help_requested",
+    "robot_id": "r_1a2b3c4d",
+    "data": { "reason": "nav_goal_failed" }
+  }
+}

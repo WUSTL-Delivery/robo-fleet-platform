@@ -1,0 +1,7 @@
+{
+  "v": 0,
+  "type": "manifest",
+  "payload": {
+    "drive": { "type": "teleport", "max_v_mps": 1.5, "max_w_radps": 2.0 }
+  }
+}
