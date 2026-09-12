@@ -50,3 +50,22 @@ func TestValidateRejectsNonPositive(t *testing.T) {
 		t.Fatal("expected error for heartbeat_interval_ms = 0")
 	}
 }
+
+func TestBootstrapPairValidation(t *testing.T) {
+	cfg := Default()
+	cfg.BootstrapFleet = "club-fleet"
+	if _, err := cfg.validate(); err == nil {
+		t.Fatal("fleet without key should fail")
+	}
+	cfg.BootstrapEnrollKey = "short"
+	if _, err := cfg.validate(); err == nil {
+		t.Fatal("short key should fail")
+	}
+	cfg.BootstrapEnrollKey = "0123456789abcdef0123456789abcdef"
+	if _, err := cfg.validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Bootstrap() {
+		t.Fatal("Bootstrap() should be true")
+	}
+}

@@ -2,6 +2,9 @@
 //
 //	fleet-server -config fleet.yml
 //	fleet-server -config fleet.yml -bootstrap my-fleet   # first run: prints an enrollment key
+//	FLEET_BOOTSTRAP_FLEET=my-fleet FLEET_BOOTSTRAP_ENROLL_KEY=... fleet-server
+//	                                                     # declarative alternative: the key is
+//	                                                     # chosen by the operator (e.g. a CI secret)
 //	fleet-server -version                                # stamped at build time
 //	fleet-server -healthcheck                            # container HEALTHCHECK: GET /healthz
 //
@@ -56,6 +59,12 @@ func main() {
 		fatal(err)
 	}
 	defer st.Close()
+
+	if cfg.Bootstrap() {
+		if err := app.Bootstrap(st, cfg.BootstrapFleet, cfg.BootstrapEnrollKey); err != nil {
+			fatal(err)
+		}
+	}
 
 	if *bootstrap != "" {
 		fleet, ok, err := st.FleetByName(*bootstrap)

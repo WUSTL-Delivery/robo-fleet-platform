@@ -32,6 +32,10 @@ type Store interface {
 	CreateEnrollKey(fleetID string) (string, error)
 	// AuthEnroll resolves an enrollment key to its fleet.
 	AuthEnroll(key string) (fleetID string, ok bool, err error)
+	// SeedEnrollKey registers a caller-chosen enrollment key (stored hashed).
+	// Idempotent: seeding a key that already exists is a no-op, and a revoked
+	// key stays revoked.
+	SeedEnrollKey(fleetID, key string) error
 
 	// CreateToken mints an opaque per-client token (returned once, stored hashed).
 	CreateToken(fleetID string, kind Kind, name string) (string, Client, error)

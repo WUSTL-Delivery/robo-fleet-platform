@@ -21,7 +21,17 @@ type Config struct {
 	HeartbeatIntervalMs int    `yaml:"heartbeat_interval_ms"`
 	LeaseTTLMs          int    `yaml:"lease_ttl_ms"`
 	SweepMs             int    `yaml:"sweep_ms"`
+
+	// Optional declarative bootstrap: on startup, ensure this fleet exists and
+	// that this enrollment key is registered for it. Lets an operator choose the
+	// key up front (e.g. a CI secret shared with the clients that will enroll)
+	// instead of minting one on the box with -bootstrap. Idempotent.
+	BootstrapFleet     string `yaml:"bootstrap_fleet"`
+	BootstrapEnrollKey string `yaml:"bootstrap_enroll_key"`
 }
+
+// MinEnrollKeyLen guards against seeding a guessable key.
+const MinEnrollKeyLen = 16
 
 func Default() Config {
 	return Config{
@@ -59,6 +69,8 @@ const (
 	EnvHeartbeatIntervalMs = "FLEET_HEARTBEAT_INTERVAL_MS"
 	EnvLeaseTTLMs          = "FLEET_LEASE_TTL_MS"
 	EnvSweepMs             = "FLEET_SWEEP_MS"
+	EnvBootstrapFleet      = "FLEET_BOOTSTRAP_FLEET"
+	EnvBootstrapEnrollKey  = "FLEET_BOOTSTRAP_ENROLL_KEY"
 )
 
 func (c *Config) applyEnv(lookup func(string) (string, bool)) error {
@@ -67,6 +79,12 @@ func (c *Config) applyEnv(lookup func(string) (string, bool)) error {
 	}
 	if v, ok := lookup(EnvDB); ok {
 		c.DB = v
+	}
+	if v, ok := lookup(EnvBootstrapFleet); ok {
+		c.BootstrapFleet = v
+	}
+	if v, ok := lookup(EnvBootstrapEnrollKey); ok {
+		c.BootstrapEnrollKey = v
 	}
 	for _, e := range []struct {
 		name string
@@ -101,9 +119,16 @@ func (c Config) validate() (Config, error) {
 		return c, fmt.Errorf("config: lease_ttl_ms must be > 0")
 	case c.SweepMs <= 0:
 		return c, fmt.Errorf("config: sweep_ms must be > 0")
+	case (c.BootstrapFleet == "") != (c.BootstrapEnrollKey == ""):
+		return c, fmt.Errorf("config: bootstrap_fleet and bootstrap_enroll_key must be set together")
+	case c.BootstrapEnrollKey != "" && len(c.BootstrapEnrollKey) < MinEnrollKeyLen:
+		return c, fmt.Errorf("config: bootstrap_enroll_key must be at least %d characters", MinEnrollKeyLen)
 	}
 	return c, nil
 }
+
+// Bootstrap reports whether declarative bootstrap is configured.
+func (c Config) Bootstrap() bool { return c.BootstrapFleet != "" }
 
 func (c Config) HeartbeatInterval() time.Duration {
 	return time.Duration(c.HeartbeatIntervalMs) * time.Millisecond

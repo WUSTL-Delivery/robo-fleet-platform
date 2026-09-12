@@ -78,6 +78,12 @@ func (s *Sqlite) CreateEnrollKey(fleetID string) (string, error) {
 	return key, nil
 }
 
+func (s *Sqlite) SeedEnrollKey(fleetID, key string) error {
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO enroll_keys (id, fleet_id, key_hash) VALUES (?, ?, ?)`,
+		"ek_"+randHex(8), fleetID, hashSecret(key))
+	return err
+}
+
 func (s *Sqlite) AuthEnroll(key string) (string, bool, error) {
 	var fleetID string
 	err := s.db.QueryRow(`SELECT fleet_id FROM enroll_keys WHERE key_hash = ? AND revoked = 0`,
