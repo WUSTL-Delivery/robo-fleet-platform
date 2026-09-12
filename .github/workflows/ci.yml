@@ -1,0 +1,113 @@
+name: CI
+
+# Test on every push and PR; publish the server image to GHCR from the default
+# branch (":edge") and from version tags ("vX.Y.Z" → ":X.Y.Z", ":X.Y", ":X").
+# Consumers (the club repo) pin an exact tag in compose. See docs/RELEASING.md.
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+# One run per ref; a newer push cancels the older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: gofmt
+        working-directory: server
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        working-directory: server
+        run: go vet ./...
+
+      - name: go test
+        working-directory: server
+        run: go test ./...
+
+      # Same gate the club deploy uses: refuse to ship a known vulnerability.
+      - name: govulncheck
+        working-directory: server
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  image:
+    name: Build and publish image
+    needs: test
+    # Default branch and version tags only; never for pull requests (a fork's
+    # PR has no packages:write token anyway).
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) ||
+       startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Stamped into the binary as main.version: "0.1.0" for tag v0.1.0,
+      # otherwise the branch name (e.g. "main") — `fleet-server -version` prints it.
+      - name: Compute version
+        id: version
+        run: |
+          ref="${{ github.ref_name }}"
+          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+
+      # metadata-action lowercases the owner (GHCR requires lowercase names), so
+      # "WUSTL-Delivery" becomes "wustl-delivery" in the published image name.
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/fleet-server
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=sha-
+            type=raw,value=edge,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: server
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

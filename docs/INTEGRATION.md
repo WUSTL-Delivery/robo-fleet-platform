@@ -1,0 +1,622 @@
+# Integrating an application with fleet-platform
+
+> Audience: someone building a fleet application on top of this repo. The worked example
+> throughout is the club's delivery system,
+> [`delivery-gdg-platform`](https://github.com/WUSTL-Delivery/delivery-gdg-platform), which
+> is the reference deployment. Everything here is verified against the server as of commit
+> `b4faef9` (protocol v0). Where v0 has a gap, the gap is called out rather than papered over.
+
+The one-sentence model: **your app is a client, not a fork.** Robots and your backend
+services each hold one outbound WebSocket to `fleet-server`; the platform owns
+connections, presence, the intervention queue, leases, and the message bus; your app owns
+every domain decision (orders, matching, pathing, the campus graph) and talks to robots
+*through* the platform on opaque channels. Nothing delivery-shaped is added to this repo.
+
+```
+delivery-gdg-platform (yours)                      fleet-platform (this repo)
+┌──────────────────────────────┐                   ┌──────────────────────────────┐
+│ command brain  (service) ────┼── wss ───────────►│                              │
+│ path service   (service) ────┼── wss ───────────►│   fleet-server               │
+│ kafka bridge   (service) ────┼── wss ───────────►│   auth · presence · queue    │
+│ Next.js app, orders, Kafka   │  (unchanged)      │   leases · bus · signaling   │
+└──────────────────────────────┘                   │                              │
+┌──────────────────────────────┐                   │   ops console (browser)      │
+│ robot: fleet_agent + thin    ┼── wss ───────────►│                              │
+│ club node → Nav2             │                   └──────────────────────────────┘
+└──────────────────────────────┘
+```
+
+Contents
+
+1. [Run the server locally](#1-run-the-server-locally)
+2. [Wire protocol essentials](#2-wire-protocol-essentials)
+3. [The four integration roles](#3-the-four-integration-roles)
+4. [Worked example: a service in TypeScript](#4-worked-example-a-service-in-typescript)
+5. [Worked example: a robot in Python](#5-worked-example-a-robot-in-python)
+6. [Migration map for delivery-gdg-platform](#6-migration-map-for-delivery-gdg-platform)
+7. [Deploying next to the club stack](#7-deploying-next-to-the-club-stack)
+8. [What v0 does not do yet](#8-what-v0-does-not-do-yet)
+9. [Testing your integration](#9-testing-your-integration)
+
+---
+
+## 1. Run the server locally
+
+Prerequisites: Go 1.26+, or Docker. No external database (sqlite is embedded).
+
+From source:
+
+```bash
+cd server
+go build -o bin/fleet-server ./cmd/fleet-server
+
+cat > fleet.yml <<'EOF'
+listen: ":8080"
+db: "fleet.db"
+heartbeat_interval_ms: 10000   # clients heartbeat at this rate; ~2.5 missed => offline
+lease_ttl_ms: 15000            # teleop lease expires this long after grant/renew
+sweep_ms: 1000                 # how often lapsed heartbeats / expired leases are swept
+EOF
+
+# First run: create a fleet and print an enrollment key (shown once, stored hashed).
+./bin/fleet-server -config fleet.yml -bootstrap club-fleet
+#   INFO bootstrap: created fleet fleet=club-fleet id=f_...
+#   enrollment key for fleet "club-fleet": fp-ek-...
+#   INFO fleet-server listening addr=:8080 db=fleet.db
+```
+
+Endpoints:
+
+| Path       | What                                                        |
+|------------|-------------------------------------------------------------|
+| `/ws`      | the only client endpoint; every robot, service, operator     |
+| `/healthz` | `{"ok":true}`                                               |
+| `/`        | placeholder until the console lands                         |
+
+Running `-bootstrap` again on an existing fleet mints another enrollment key for it. Keys
+are reusable until revoked and do not expire in v0 (see §8), so treat the key as a
+secret: it lets anyone register a robot or service into your fleet.
+
+From the published image, with no config file (every key has a `FLEET_*` environment
+variable; env beats file beats default):
+
+```bash
+docker run --rm -p 8080:8080 -v fleet-data:/var/lib/fleet \
+  -e FLEET_HEARTBEAT_INTERVAL_MS=10000 \
+  ghcr.io/<owner>/fleet-server:0.1.0 -bootstrap club-fleet
+```
+
+`fleet-server -version` prints the stamped release; `fleet-server -healthcheck` is what
+the image's HEALTHCHECK runs. Tags and the release process are in `docs/RELEASING.md`.
+
+---
+
+## 2. Wire protocol essentials
+
+The full contract is `protocol/` (JSON Schema, draft 2020-12) and it is the source of
+truth; `protocol/README.md` has the message catalog. This section is the subset you need
+to integrate. There is no SDK yet (§8), so today you speak raw JSON over WebSocket. The
+shapes below are exactly what the SDKs will wrap.
+
+### 2.1 Envelope
+
+Every message, both directions, is one JSON text frame:
+
+```json
+{ "v": 0, "type": "telemetry", "id": "optional-correlation-id", "ts_ms": 1755100000000, "payload": { } }
+```
+
+`v` must be `0`. `payload` is always an object. `id` is echoed back as `ref` on any
+`error` reply, so set it when you want to correlate failures. Unknown `type` gets an
+`error` with code `invalid_message`.
+
+### 2.2 Identity: enroll once, then hello every time
+
+Client identity is derived from a token server-side and never claimed in a message.
+Getting a token is a one-shot exchange on its own socket:
+
+```
+client                                   fleet-server
+  │── enroll.request {enrollment_key, kind, name} ──►│  key → fleet; mints token
+  │◄─ enroll.response {token, client_id, fleet_id} ──│
+  │◄─ close ─────────────────────────────────────────│  (enroll always closes)
+```
+
+`kind` is `robot` or `service`. Store the token (it is shown once). Every later
+connection opens with `hello`:
+
+```
+  │── hello {token, agent?} ───────────────────────►│  token → client_id, fleet, kind
+  │◄─ welcome {client_id, fleet_id, kind,           │
+  │            server_time_ms, heartbeat_interval_ms}│
+```
+
+Rules enforced by the gateway:
+
+- The first frame must be `enroll.request` or `hello`, within 10 s, or the socket is closed.
+- One live connection per identity. A second `hello` with the same token wins and the
+  older socket gets `error{code: conflict}` then close. Reconnect with the same token;
+  never re-enroll on reconnect.
+- Client ids are prefixed by kind: `r_…` robot, `s_…` service, `o_…` operator.
+
+### 2.3 Heartbeat or die
+
+After `welcome`, send `{"v":0,"type":"heartbeat","payload":{}}` every
+`heartbeat_interval_ms`. Miss ~2.5 intervals and the server sends
+`error{code: rate_limited, message: "heartbeat lapsed"}`, closes the socket, and (for a
+robot) emits `robot.offline`. Presence is heartbeat-based for *every* kind, including your
+backend services. Do not rely on the TCP socket staying open as proof of liveness.
+
+### 2.4 Who may send what
+
+The server checks the client kind on every message. Sending something outside your
+kind's column returns `error{code: not_authorized}`.
+
+| Message | robot | service | operator | Notes |
+|---|:-:|:-:|:-:|---|
+| `heartbeat` | ✓ | ✓ | ✓ | |
+| `manifest` | ✓ | | | capability declaration; console renders only what is declared |
+| `telemetry` | ✓ | | | fans out as `event{robot.telemetry}` to `telemetry` subscribers |
+| `help.request` | ✓ | | | AUTONOMOUS → HELP_REQUESTED; emits `robot.help_requested` |
+| `subscribe` | ✓ | ✓ | ✓ | reply is a `snapshot`, then live `event`s |
+| `channel.publish` | ✓ | ✓ | ✓ | opaque domain payload, see 2.6 |
+| `signal` | ✓ | ✓ | ✓ | WebRTC offer/answer/ice relay to `to`, server stamps `from` |
+| `layer.declare` / `layer.update` | | ✓ | | GeoJSON map layers, see 2.7 |
+| `lease.claim` / `lease.renew` / `lease.release` | | | ✓ | intervention authority |
+| `twist` | | | ✓ | must carry a live `lease_id` the sender holds |
+
+Everything is scoped to the fleet the token belongs to. A `to` target in another fleet
+looks identical to a disconnected one: `error{code: not_found}`.
+
+### 2.5 Subscribe: snapshot, then stream
+
+```json
+{ "v": 0, "type": "subscribe", "payload": { "topics": ["presence", "events", "telemetry", "channel:edge_report"] } }
+```
+
+Topics:
+
+| Topic | You receive |
+|---|---|
+| `presence` | `event{robot.online}`, `event{robot.offline}` |
+| `events` | `event{robot.help_requested}`, `robot.lease_granted`, `robot.lease_released`, `robot.lease_revoked` |
+| `telemetry` | `event{robot.telemetry, robot_id, data: <the telemetry payload>}` for every robot in the fleet |
+| `layers` | every `layer.declare` / `layer.update` from services in the fleet |
+| `channel:<name>` | `channel.message` for broadcasts on that channel |
+
+The immediate reply is one `snapshot` listing every robot the fleet has ever enrolled,
+with `presence`, FSM `state` (`AUTONOMOUS | HELP_REQUESTED | TELEOP`), the `manifest` if
+online, and the current `lease` if any. This is what makes a service restartable: rebuild
+your world model from the snapshot plus your own database, then apply events. Subscribes
+are additive and can be repeated; each one returns a fresh snapshot.
+
+### 2.6 Channels: the only place your domain vocabulary goes
+
+The platform never inspects `data`. Anything shaped like an order, a waypoint list, or an
+edge report rides here.
+
+```json
+{ "v": 0, "type": "channel.publish",
+  "payload": { "channel": "assignment", "to": "r_1a2b3c4d", "data": { "order_id": 17, "waypoints": ["n3","n7","n9"] } } }
+```
+
+- Exactly one of `to` (a connected client id in your fleet) or `"broadcast": true`.
+- Directed publish to a client that is not connected fails with `not_found`. Nothing is queued.
+- Broadcast reaches (a) every client subscribed to `channel:<name>` and (b) every online
+  robot whose manifest lists `<name>` in `channels`. The sender is excluded.
+- Receivers get `channel.message {channel, from, data}` with `from` stamped by the server.
+- Delivery is **at-most-once by design**. If you need an acknowledgement, put a sequence
+  number in `data` and have the receiver reply on the same channel. Make assignments
+  idempotent on the robot side.
+- Payload cap is 64 KB per envelope; the per-client send queue is 64 messages and a client
+  that cannot keep up is disconnected rather than allowed to stall the fleet.
+
+Channel names match `^[a-z0-9][a-z0-9_.-]{0,63}$`.
+
+### 2.7 Layers: putting your data on the ops map
+
+A service declares a layer once, then pushes GeoJSON updates. The console renders it
+generically according to `style`; there is no layer-specific code in the platform.
+
+```json
+{ "v": 0, "type": "layer.declare",
+  "payload": { "layer_id": "campus-graph", "kind": "geojson", "title": "Campus waypoint graph",
+               "style": { "line-color-by": "properties.eta_band" } } }
+{ "v": 0, "type": "layer.update",
+  "payload": { "layer_id": "campus-graph", "data": { "type": "FeatureCollection", "features": [] } } }
+```
+
+In v0 layers fan out live to `layers` subscribers only; the server does not retain the
+last update, so re-declare and re-send on reconnect (§8).
+
+### 2.8 Errors
+
+`error{code, message, ref}` with `code` one of `auth_failed`, `invalid_message`,
+`not_found`, `not_authorized`, `conflict`, `rate_limited`. `ref` is the `id` of the
+message that caused it when there was one. Errors do not close the socket except during
+the handshake and on heartbeat lapse.
+
+---
+
+## 3. The four integration roles
+
+This is how the pieces of delivery-gdg-platform map onto platform client kinds. The design
+rationale is `docs/DESIGN.md` D6 and `docs/proposals/control-server.md` §2 to §8; this
+section is the operational version.
+
+### 3.1 Command brain (kind: `service`)
+
+Replaces `apps/command` and the socket hub half of `apps/authoritative`. One outbound
+WebSocket, no inbound listener.
+
+| It does | On the wire |
+|---|---|
+| Learn which robots exist and are online | `subscribe ["presence","events","telemetry"]` → snapshot, then events |
+| Track pose for progress / ETA judgement | `event{robot.telemetry}` |
+| Know when a robot is in teleop (do not dispatch to it) | `robot.lease_granted` / `robot.lease_released` / `robot.lease_revoked` |
+| Dispatch an assignment | `channel.publish {channel:"assignment", to: robot_id, data: {…}}` |
+| Confirm the robot took it | robot replies on the same channel; brain re-sends until it does |
+| Replan after handback | on `robot.lease_released`, robot reports leg invalidated on a channel; brain routes fresh |
+
+The delivery FSM (`IDLE → ASSIGNED → MOVING_TO_PICKUP → …`) stays in the brain, branched
+from `apps/authoritative/internal/state/`. The platform FSM
+(`AUTONOMOUS | HELP_REQUESTED | TELEOP`) is separate and the two never merge: a robot can be
+`MOVING_TO_DROPOFF` and `TELEOP` at the same moment. Retire the state manager's own
+`IsOnline` field; presence now has one source of truth.
+
+### 3.2 Path service (kind: `service`)
+
+| It does | On the wire |
+|---|---|
+| Publish the campus graph for operators to see | `layer.declare {layer_id:"campus-graph", kind:"geojson", style}` then `layer.update` on every weight change |
+| Learn actual traversal times | `subscribe ["channel:edge_report"]`, receive `channel.message` per completed leg |
+
+Whether the brain calls the path service over Kafka, gRPC, or in-process is the club's
+choice; that is club-to-club traffic and the platform is not involved.
+
+### 3.3 Kafka bridge (kind: `service`)
+
+Roughly thirty lines. Subscribes to `presence`, `events`, `telemetry`, and whichever
+channels the club wants mirrored, and produces to the existing Kafka topics
+(`robot-update` today) for consumers that stay on Kafka. One direction only in v1:
+platform → Kafka. Do not replay Kafka into `channel.publish`; a durable log feeding an
+at-most-once command bus re-sends stale commands at robots after a restart. Anything that
+needs to command a robot uses the platform directly.
+
+### 3.4 Thin club node on the robot (kind: `robot`, via `fleet_agent`)
+
+The generic `fleet_agent` (planned, `sdk/ros2`, Python) owns the socket, manifest,
+heartbeat, twist to `/cmd_vel`, lease check, and deadman. The club node is the ~50 lines
+that make it a delivery robot:
+
+| It does | On the wire |
+|---|---|
+| Declare which channels it speaks | manifest `channels: ["assignment", "edge_report"]` |
+| Receive an assignment and run it leg by leg on Nav2 | `channel.message {channel:"assignment"}` |
+| Acknowledge the assignment | `channel.publish {channel:"assignment", to: <from>, data:{ack: seq}}` |
+| Report each leg | `channel.publish {channel:"edge_report", broadcast:true, data:{edge_id, seconds, blocked?}}` |
+| Escalate when a leg fails (policy is club code) | `help.request {reason, context}` |
+| Stop autonomy on takeover | on `lease.granted`, cancel the active Nav2 goal; on `lease.revoked`, report leg invalidated and wait for a new assignment |
+
+Until `fleet_agent` exists, the robot side is the raw protocol as in §5.
+
+---
+
+## 4. Worked example: a service in TypeScript
+
+A minimal command brain against the current server, no dependencies (Node 22 has a global
+`WebSocket`). It enrolls if it has no token, connects, subscribes, and dispatches an
+assignment to every robot that comes online. This is the shape the future
+`sdk/typescript` will wrap; the SDK will not change any message on the wire.
+
+```ts
+// brain.ts — run with: node --experimental-strip-types brain.ts
+// env: FLEET_URL=ws://localhost:8080/ws  FLEET_ENROLL_KEY=fp-ek-...  (first run)
+//      FLEET_TOKEN=fp-tk-...                                         (after that)
+type Envelope = { v: 0; type: string; id?: string; ts_ms?: number; payload: any };
+
+const url = process.env.FLEET_URL ?? "ws://localhost:8080/ws";
+
+function envelope(type: string, payload: unknown, id?: string): string {
+  return JSON.stringify({ v: 0, type, id, ts_ms: Date.now(), payload } satisfies Envelope);
+}
+
+// One-shot: enrollment key → token. The server closes the socket after replying.
+async function enroll(key: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    ws.onopen = () => ws.send(envelope("enroll.request", { enrollment_key: key, kind: "service", name: "brain" }));
+    ws.onmessage = (m) => {
+      const env: Envelope = JSON.parse(String(m.data));
+      if (env.type === "enroll.response") resolve(env.payload.token);
+      else reject(new Error(`enroll failed: ${JSON.stringify(env.payload)}`));
+    };
+    ws.onerror = reject;
+  });
+}
+
+async function main() {
+  const token = process.env.FLEET_TOKEN ?? (await enroll(process.env.FLEET_ENROLL_KEY!));
+  console.log("token (store this):", token);
+
+  const ws = new WebSocket(url);
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  const online = new Map<string, unknown>(); // robot_id → manifest (the world model, tiny)
+
+  ws.onopen = () => ws.send(envelope("hello", { token, agent: { name: "brain", version: "0.0.1" } }));
+
+  ws.onmessage = (m) => {
+    const env: Envelope = JSON.parse(String(m.data));
+    switch (env.type) {
+      case "welcome":
+        heartbeat = setInterval(() => ws.send(envelope("heartbeat", {})), env.payload.heartbeat_interval_ms);
+        ws.send(envelope("subscribe", { topics: ["presence", "events", "telemetry", "channel:edge_report"] }));
+        break;
+
+      case "snapshot": // rebuild the world model; then events keep it current
+        console.log("snapshot:", env.payload.robots.map((r: any) => `${r.robot_id}:${r.presence}/${r.state}`));
+        for (const r of env.payload.robots) {
+          if (r.presence !== "online") continue;
+          online.set(r.robot_id, r.manifest);
+          if (r.state === "AUTONOMOUS") dispatch(r.robot_id); // robots that were already up when we (re)started
+        }
+        break;
+
+      case "event":
+        switch (env.payload.event) {
+          case "robot.online":
+            online.set(env.payload.robot_id, null);
+            dispatch(env.payload.robot_id);
+            break;
+          case "robot.offline":
+            online.delete(env.payload.robot_id);
+            break;
+          case "robot.help_requested":
+          case "robot.lease_granted":
+          case "robot.lease_released":
+          case "robot.lease_revoked":
+            console.log("ops:", env.payload.event, env.payload.robot_id, env.payload.data);
+            break;
+          case "robot.telemetry":
+            // env.payload.data.pose is frame-relative: check pose.frame before reading lat/lon
+            break;
+        }
+        break;
+
+      case "channel.message": // e.g. edge_report broadcasts, or an assignment ack
+        console.log("channel", env.payload.channel, "from", env.payload.from, env.payload.data);
+        break;
+
+      case "error":
+        console.error("server error:", env.payload);
+        break;
+    }
+  };
+
+  ws.onclose = () => { clearInterval(heartbeat); /* reconnect with backoff, same token */ };
+
+  // Domain payload; the platform never looks inside `data`. Use `id` so a failure
+  // (robot went offline between event and publish) comes back with `ref`.
+  function dispatch(robotId: string) {
+    const assignment = { seq: Date.now(), order_id: 17, waypoints: ["n3", "n7", "n9"], deadline_ms: Date.now() + 600_000 };
+    ws.send(envelope("channel.publish", { channel: "assignment", to: robotId, data: assignment }, `assign-${robotId}`));
+  }
+}
+
+main();
+```
+
+What is deliberately missing, because it belongs in your code: retrying an assignment until
+the robot acks it on the channel, and the delivery state machine. What is deliberately
+missing because the SDK will provide it: reconnect with backoff, a typed event emitter, a
+request/ack helper for channels.
+
+---
+
+## 5. Worked example: a robot in Python
+
+The same server from the robot side, using the `websockets` package
+(`pip install websockets`). This is what `fleet_agent` will do internally; the club node
+is the `on_assignment` and `on_leg_done` parts.
+
+```python
+# robot.py — FLEET_URL, FLEET_ENROLL_KEY or FLEET_TOKEN as in the TS example
+import asyncio, json, os, time
+import websockets
+
+URL = os.environ.get("FLEET_URL", "ws://localhost:8080/ws")
+
+def envelope(type_, payload, id_=None):
+    return json.dumps({"v": 0, "type": type_, "id": id_, "ts_ms": int(time.time() * 1000), "payload": payload})
+
+async def enroll(key):
+    async with websockets.connect(URL) as ws:
+        await ws.send(envelope("enroll.request", {"enrollment_key": key, "kind": "robot", "name": "delivery-01",
+                                                  "agent": {"name": "fleet_agent", "version": "0.0.1"}}))
+        env = json.loads(await ws.recv())
+        assert env["type"] == "enroll.response", env
+        return env["payload"]["token"]
+
+async def heartbeat(ws, interval_ms):
+    while True:
+        await asyncio.sleep(interval_ms / 1000)
+        await ws.send(envelope("heartbeat", {}))
+
+async def telemetry(ws):
+    while True:  # ~1 Hz is plenty for the control plane; video never rides this socket
+        await ws.send(envelope("telemetry", {
+            "pose": {"frame": "geographic", "lat": 38.6488, "lon": -90.3108, "yaw_rad": 1.57},
+            "velocity": {"v_mps": 0.0, "w_radps": 0.0},
+            "battery": {"pct": 87.5},
+            "health": {"gps_fix": "rtk_fixed"},
+        }))
+        await asyncio.sleep(1)
+
+async def main():
+    token = os.environ.get("FLEET_TOKEN") or await enroll(os.environ["FLEET_ENROLL_KEY"])
+    print("token (store this):", token)
+    lease_id = None  # twist is only obeyed while this matches; deadman stops the base otherwise
+
+    async with websockets.connect(URL) as ws:
+        await ws.send(envelope("hello", {"token": token}))
+        welcome = json.loads(await ws.recv())
+        assert welcome["type"] == "welcome", welcome
+
+        # Capability manifest: the console renders exactly this, nothing more.
+        await ws.send(envelope("manifest", {
+            "drive": {"type": "twist", "max_v_mps": 1.5, "max_w_radps": 2.0},
+            "cameras": [{"id": "front", "label": "RealSense RGB"}],
+            "battery": {},
+            "channels": ["assignment", "edge_report"],   # domain channels the club node speaks
+        }))
+        asyncio.create_task(heartbeat(ws, welcome["payload"]["heartbeat_interval_ms"]))
+        asyncio.create_task(telemetry(ws))
+
+        async for raw in ws:
+            env = json.loads(raw)
+            p = env["payload"]
+            if env["type"] == "channel.message" and p["channel"] == "assignment":
+                # club node: ack, then run Nav2 legs. Idempotent on data["seq"].
+                await ws.send(envelope("channel.publish", {"channel": "assignment", "to": p["from"], "data": {"ack": p["data"]["seq"]}}))
+                # ... per completed leg:
+                await ws.send(envelope("channel.publish", {"channel": "edge_report", "broadcast": True,
+                                                            "data": {"edge_id": "e12", "seconds": 41.5}}))
+                # ... when a leg fails past the club's escalation policy:
+                await ws.send(envelope("help.request", {"reason": "nav_goal_failed", "context": {"attempts": 3}}))
+            elif env["type"] == "lease.granted":
+                lease_id = p["lease_id"]     # cancel the active Nav2 goal here; operator has the wheel
+            elif env["type"] == "lease.revoked":
+                lease_id = None              # zero velocity now; report leg invalidated; await a fresh assignment
+            elif env["type"] == "twist":
+                if p["lease_id"] == lease_id:
+                    pass                     # publish to the top-priority input of the twist mux
+            elif env["type"] == "error":
+                print("server error:", p)
+
+asyncio.run(main())
+```
+
+Two things the real `fleet_agent` must add that this sketch omits: a ~300 ms deadman that
+zeroes velocity when no valid twist arrives during `TELEOP`, and reconnect with backoff
+using the same token. Neither depends on the server being reachable.
+
+---
+
+## 6. Migration map for delivery-gdg-platform
+
+What in the club repo maps to what on the platform. This is D6's table made concrete.
+
+| In `delivery-gdg-platform` today | Becomes |
+|---|---|
+| `internal/wsockets/` hub, `Message{type, payload}` | the platform envelope; hub deleted |
+| `apps/command` (TCP/UDP relay demo) | deleted; the brain is a `service` client |
+| `robot.proto` `PositionUpdate{latitude, longitude, heading, speed}` | `telemetry.pose {frame:"geographic", lat, lon, yaw_rad}` + `telemetry.velocity.v_mps`. Heading in degrees becomes yaw in radians, CCW, 0 = East |
+| `robot.proto` `BatteryUpdate{battery_level, is_charging}` | `telemetry.battery {pct}`; `is_charging` goes in `telemetry.health` or a channel, it is not platform vocabulary |
+| `robot.proto` `StatusUpdate{RobotStatus}` (IDLE, ASSIGNED, …) | **stays club-side.** Robot publishes it on a channel (e.g. `delivery_status`); the brain's FSM consumes it |
+| `RobotMatch{robot_id, order_id}` over the hub | `channel.publish {channel:"assignment", to: robot_id, data}` from the brain |
+| Kafka `robot-update` topic fed by the hub | the bridge service, fed by `presence` + `telemetry` subscriptions |
+| `internal/state/` manager (`RobotState.IsOnline`, `GetAvailableRobots`) | stays as the brain's world model; `IsOnline` retired in favor of `snapshot` + `robot.online/offline` |
+| Robot rows in `pkg/db.go` | platform DB (fleets, clients, tokens). Club DB keeps users, orders, deliveries |
+| `apps/authoritative` port 8080 `/ws` | `fleet-server` `/ws` |
+| Matcher, Next.js app, orders, gRPC `OrderHandler` | unchanged |
+
+The migration is scheduled for roadmap step 4, after the vertical slice and queue work are
+done against the sim, so protocol churn does not land on the club mid-semester.
+
+---
+
+## 7. Deploying next to the club stack
+
+The club's `deployments/docker-compose.yml` already runs Caddy in front of the Next.js app.
+`fleet-server` is one more stateful container behind it, consumed as a **prebuilt image**
+from this repo's CI (image coupling: the tag in compose is the club's pin, bumped in a
+reviewed commit; see `docs/RELEASING.md`). This is what the club repo now carries:
+
+```yaml
+  fleet-server:
+    image: ${FLEET_SERVER_IMAGE:-ghcr.io/wustl-delivery/fleet-server:0.1.0}
+    restart: unless-stopped
+    environment:
+      FLEET_LISTEN: ":8080"
+      FLEET_DB: /var/lib/fleet/fleet.db
+      FLEET_HEARTBEAT_INTERVAL_MS: "10000"
+      FLEET_LEASE_TTL_MS: "15000"
+    volumes:
+      - fleet-data:/var/lib/fleet       # sqlite: fleets, clients, tokens
+    healthcheck:
+      test: ["CMD", "fleet-server", "-healthcheck"]
+      interval: 15s
+    # no host port in prod; Caddy proxies to it
+volumes:
+  fleet-data:
+```
+
+Set `FLEET_SERVER_IMAGE=fleet-server:dev` in `.env` to run a locally built image instead
+of the pin (`docker build -t fleet-server:dev server/`).
+
+Caddy: add a host for the fleet and terminate TLS there. The server speaks plain
+WebSocket; robots and services dial `wss://fleet.<domain>/ws`.
+
+```caddy
+fleet.{$DOMAIN_NAME} {
+	reverse_proxy fleet-server:8080
+}
+```
+
+Notes:
+
+- `apps/authoritative` also binds host port 8080 for its own `/ws`. Do not publish
+  `fleet-server` on the host at all; let Caddy route by hostname.
+- Exactly one `fleet-server` replica. It is stateful (presence, leases live in memory).
+  Recovery is restart; robots redial with backoff and stuck robots wait in
+  `HELP_REQUESTED`. Do not scale it horizontally.
+- Teleop video needs a TURN server (`coturn`) beside it once WebRTC media lands. Not
+  needed for anything in this document.
+- To mint the first enrollment key in a container:
+  `docker compose run --rm fleet-server -bootstrap club-fleet`.
+- The club's first client is `apps/fleet-bridge` in delivery-gdg-platform: it enrolls
+  with that key once, keeps its token on a volume, and forwards presence, telemetry and
+  intervention events to Kafka (§3.3).
+
+---
+
+## 8. What v0 does not do yet
+
+Read this before designing against the server. Each item is a known gap, not a hidden one.
+
+| Gap | Consequence for you | Where it lands |
+|---|---|---|
+| **No SDKs.** `sdk/` does not exist yet | speak raw JSON as in §4 and §5; the SDKs will wrap exactly these messages | D12: TypeScript first, then Python, then `fleet_agent` |
+| **No operator enrollment or console auth.** `enroll.request` accepts only `robot` and `service`; operator tokens can only be created in the store today | you cannot yet put a human at the wheel from outside a test; operator flows are exercised by the Go integration tests | console milestone (roadmap step 1) |
+| **No console** | `/` is a placeholder; layers and telemetry have nowhere to render yet | vertical slice |
+| **Layers are not retained** | a service must re-declare and re-send after it reconnects, and a console that connects later sees nothing until the next update | console milestone |
+| **Enrollment keys never expire and are reusable** | treat the key as a long-lived secret; rotation is by revoking in the DB | admin surface, later |
+| **No rate limiting beyond the 64 KB payload cap and the 64-deep send queue** | a chatty telemetry loop will be disconnected for overflow before it is throttled | fan-out work |
+| **Twist rides the bus as a fallback**; no WebRTC media, no TURN | fine for sim and for testing the club node's lease handling; not for driving a real robot | roadmap step 3 |
+| **No replay / black-box recording** | | later milestone |
+| **Snapshot lists robots only** | you cannot discover other services or operators from a snapshot | if a real need appears |
+| **Placeholders**: Go module path `fleetplatform/server`, schema `$id` host `fleetplatform.local` | do not hard-code either in club code | project rename |
+
+---
+
+## 9. Testing your integration
+
+- **Contract tests.** `protocol/fixtures/valid/*.json` must all validate and
+  `protocol/fixtures/invalid/*.json` must all fail, in every language that touches the
+  wire. Run them against your own serializer before trusting it; the server already runs
+  them (`server/internal/protocol/contract_test.go`). Add a fixture whenever you find a
+  shape the schemas do not pin down.
+- **The reference storyline.** `server/internal/app/integration_test.go`
+  (`TestIntegrationStoryline`) is the canonical end-to-end flow: enroll, connect, manifest,
+  subscribe, telemetry, help, claim, twist, signaling, handback, channel broadcast,
+  offline. It runs the real server on an ephemeral port with fake JSON clients. If your
+  client and that test disagree about a message, the test is right.
+- **Run it yourself.** `cd server && go test ./...` takes a few seconds and needs nothing
+  installed beyond Go.
+- **Local two-terminal check.** Start the server (§1), run §5's robot in one terminal and
+  §4's brain in another. You should see the brain's snapshot list the robot online, then a
+  `channel.message` ack come back after it dispatches. Kill the robot and the brain sees
+  `robot.offline` within about 2.5 heartbeat intervals.
+
+The broader verification plan, including the planned SDK-level suites that launch the
+built binary, is `docs/TESTING.md`.

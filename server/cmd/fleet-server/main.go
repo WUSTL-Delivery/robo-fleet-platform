@@ -2,6 +2,11 @@
 //
 //	fleet-server -config fleet.yml
 //	fleet-server -config fleet.yml -bootstrap my-fleet   # first run: prints an enrollment key
+//	fleet-server -version                                # stamped at build time
+//	fleet-server -healthcheck                            # container HEALTHCHECK: GET /healthz
+//
+// Every config key can also come from FLEET_* environment variables (see
+// internal/config), which is how the container image is configured.
 package main
 
 import (
@@ -9,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,14 +27,28 @@ import (
 	"fleetplatform/server/internal/web"
 )
 
+// version is overridden at build time: -ldflags "-X main.version=0.1.0".
+var version = "dev"
+
 func main() {
-	configPath := flag.String("config", "", "path to bootstrap config yml")
+	configPath := flag.String("config", "", "path to bootstrap config yml (FLEET_* env vars override it)")
 	bootstrap := flag.String("bootstrap", "", "create fleet by name if missing and print a fresh enrollment key")
+	showVersion := flag.Bool("version", false, "print version and exit")
+	healthcheck := flag.Bool("healthcheck", false, "GET /healthz on the configured listen port and exit 0 if ok")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fatal(err)
+	}
+
+	if *healthcheck {
+		os.Exit(runHealthcheck(cfg.Listen))
 	}
 
 	st, err := store.OpenSqlite(cfg.DB)
@@ -74,10 +94,35 @@ func main() {
 		srv.Shutdown(shutdownCtx)
 	}()
 
-	slog.Info("fleet-server listening", "addr", cfg.Listen, "db", cfg.DB)
+	slog.Info("fleet-server listening", "version", version, "addr", cfg.Listen, "db", cfg.DB)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fatal(err)
 	}
+}
+
+// runHealthcheck probes the local server. A wildcard listen (":8080",
+// "0.0.0.0:8080") is probed on loopback.
+func runHealthcheck(listen string) int {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "healthcheck: bad listen address:", err)
+		return 1
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + net.JoinHostPort(host, port) + "/healthz")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "healthcheck:", err)
+		return 1
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintln(os.Stderr, "healthcheck: status", resp.Status)
+		return 1
+	}
+	return 0
 }
 
 func fatal(err error) {

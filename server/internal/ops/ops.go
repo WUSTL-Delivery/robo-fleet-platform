@@ -15,8 +15,8 @@ import (
 )
 
 var (
-	ErrNotFound   = errors.New("ops: no such lease")
-	ErrNotHolder  = errors.New("ops: caller does not hold this lease")
+	ErrNotFound  = errors.New("ops: no such lease")
+	ErrNotHolder = errors.New("ops: caller does not hold this lease")
 )
 
 type Lease struct {

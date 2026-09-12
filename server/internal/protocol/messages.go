@@ -264,10 +264,10 @@ type Signal struct {
 }
 
 type LayerDeclare struct {
-	LayerID string          `json:"layer_id"`
-	Kind    string          `json:"kind"`
-	Title   string          `json:"title,omitempty"`
-	Style   map[string]any  `json:"style,omitempty"`
+	LayerID string         `json:"layer_id"`
+	Kind    string         `json:"kind"`
+	Title   string         `json:"title,omitempty"`
+	Style   map[string]any `json:"style,omitempty"`
 }
 
 type LayerUpdate struct {

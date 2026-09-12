@@ -12,6 +12,10 @@ settled architecture decisions (D1–D12: topology, trust model, scope boundary,
 integration, competitive landscape, server shape, deployment) so they don't get re-litigated,
 plus the sibling-repo audit findings and the next work item (protocol v0).
 
+`docs/INTEGRATION.md` is the guide for building an app on the platform (wire protocol
+essentials, the four client roles, runnable TS service + Python robot examples, the
+delivery-gdg migration map, deployment, and the honest list of v0 gaps).
+
 ## Context
 
 Built by the software lead of the WashU GDG delivery robot project. Two sibling repos
