@@ -204,3 +204,20 @@ kbd {
 }
 .keypad .key[data-held="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .teleop-notice { margin-top: 12px; padding-left: 8px; border-left: 3px solid var(--warn); color: var(--text); }
+
+/* Capability sections other than teleop (cameras, battery). */
+.capability { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+.capability h3 { font-size: 13px; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.capability-none { margin-top: 20px; }
+.cameras { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.camera-placeholder {
+  aspect-ratio: 16 / 9; display: grid; place-content: center; gap: 4px; text-align: center; padding: 8px;
+  border: 1px dashed var(--border); border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+.camera-label { font-size: 13px; }
+.camera-placeholder .hint { margin: 0; }
+.battery-meter { height: 8px; border-radius: 999px; background: color-mix(in srgb, var(--text) 10%, transparent); overflow: hidden; }
+.battery-meter span { display: block; height: 100%; background: var(--accent); }
+.battery-meter[data-low="true"] span { background: var(--warn); }
+.battery-reading { font-size: 13px; margin: 6px 0 0; }
