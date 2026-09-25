@@ -62,6 +62,51 @@ To point the same robot at a deployed server, change the URL:
 
 The whole example is [`examples/robot.py`](examples/robot.py), under 60 lines.
 
+## Connecting to a deployed server
+
+A deployed server sits behind TLS at `wss://<host>/ws` (the club's is
+`wss://fleet.bearcarts.com/ws`, running `fleet-server` 0.1.0). Before pointing a real
+robot at it, run the live check. It needs only the fleet's enrollment key
+(`FLEET_ENROLL_KEY` from the club deploy's secrets; the script never prints it):
+
+```bash
+FLEET_ENROLL_KEY=... python sdk/python/scripts/live_check.py
+# FLEET_URL defaults to wss://fleet.bearcarts.com/ws; set it to check another server
+```
+
+It runs seven steps and prints a check mark or a cross for each, with a 15 s timeout
+per step (`FLEET_STEP_TIMEOUT`):
+
+1. the host resolves and accepts a TLS connection
+2. a throwaway robot enrolls, connects and sends its manifest (its `client_id` is printed)
+3. a watcher connects as a `service` and subscribes to `presence`
+4. the watcher sees the robot online (in the snapshot or as a `robot.online` event)
+5. the watcher sends the robot a message on channel `live-check`; the robot prints it
+6. the robot replies and the watcher receives the reply
+7. the robot closes and the watcher sees `robot.offline`
+
+It ends with `LIVE CHECK PASSED` and exit status 0, or `LIVE CHECK FAILED`, a hint, and
+exit status 1 (2 if `FLEET_ENROLL_KEY` is missing). It only uses messages 0.1.0
+supports, so it works against the club deployment and against newer servers.
+
+Things to know:
+
+- **It leaves two client rows on the server.** Both clients enroll with the fleet key
+  and keep their tokens in memory only, so nothing is written to your disk, but each run
+  registers `live-check-robot-<id>` and `live-check-watcher-<id>` on the server. v0 has
+  no way to delete a client; the rows are harmless and show as offline robots or
+  services. If you already have a service token, set `FLEET_SERVICE_TOKEN` and the
+  watcher uses it instead of enrolling, which leaves only the robot row.
+- **Some networks block the domain.** Campus and corporate networks may answer the
+  lookup with a DNS sinkhole (for example a CNAME to `sinkhole.paloaltonetworks.com`) or
+  not resolve it at all. Step 1 catches that and says so; run it again from a phone
+  hotspot or home network.
+- **python.org Python on macOS may lack CA certificates.** If step 1 fails with
+  `unable to get local issuer certificate`, run
+  `/Applications/Python 3.x/Install Certificates.command` once, or prefix the command
+  with `SSL_CERT_FILE=/etc/ssl/cert.pem`. A real robot hits the same error, so fix it
+  before deploying one.
+
 ## API overview
 
 ```python
