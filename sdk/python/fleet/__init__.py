@@ -22,12 +22,14 @@ from .client import (
     FleetClientError,
     StateChange,
 )
+from .robot import DEADMAN_MS, LeaseChange, Robot, TwistCommand, geo_pose, local_pose
 from .token_store import Credentials, FileTokenStore, MemoryTokenStore, TokenStore
 
 __version__ = "0.0.1"
 
 __all__ = [
     "CHANNEL_NAME_PATTERN",
+    "DEADMAN_MS",
     "DEFAULT_NOT_FOUND_WINDOW",
     "PROTOCOL_VERSION",
     "Backoff",
@@ -41,7 +43,12 @@ __all__ = [
     "FileTokenStore",
     "FleetClient",
     "FleetClientError",
+    "LeaseChange",
     "MemoryTokenStore",
+    "Robot",
     "StateChange",
     "TokenStore",
+    "TwistCommand",
+    "geo_pose",
+    "local_pose",
 ]
