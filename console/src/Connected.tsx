@@ -1,5 +1,5 @@
 // The signed-in console: fleet list | live map | detail pane. Selection lives
-// here so the list, the map and the detail pane (and later the teleop panel)
+// here so the list, the map and the detail pane (and its teleop section)
 // all agree on which robot the operator is looking at.
 import { useState } from "react";
 import type { FleetClient } from "@fleet-platform/sdk";
@@ -58,7 +58,7 @@ export function Connected({ client, session, onSignOut }: Props) {
       <div className="workspace">
         <FleetList robots={robots} synced={fleet.synced} selectedId={selectedId} onSelect={setSelectedId} />
         <FleetMap robots={robots} selectedId={selectedId} onSelect={setSelectedId} />
-        <RobotPanel robot={selected} onClose={() => setSelectedId(null)} />
+        <RobotPanel client={client} operatorId={welcome?.client_id} robot={selected} onClose={() => setSelectedId(null)} />
       </div>
     </div>
   );

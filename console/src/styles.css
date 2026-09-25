@@ -180,3 +180,27 @@ dl.facts dd { margin: 0; }
   .fleet-list { border-right: none; border-bottom: 1px solid var(--border); max-height: 40vh; }
   .robot-panel { border-left: none; border-top: 1px solid var(--border); }
 }
+
+/* Teleop section of the detail pane. */
+.teleop { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+.teleop h3 { font-size: 13px; margin: 0 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.teleop-status { font-size: 14px; margin: 0 0 4px; line-height: 1.45; }
+.teleop-status.driving { color: var(--accent); }
+.teleop .primary { margin-top: 14px; }
+.teleop input[type="range"] { width: 100%; padding: 0; accent-color: var(--accent); }
+.teleop label { margin-top: 12px; }
+dl.facts.compact { margin-top: 12px; font-size: 13px; }
+kbd {
+  display: inline-block; min-width: 1.4em; padding: 0 4px; border: 1px solid var(--border); border-radius: 4px;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; text-align: center;
+}
+.keypad {
+  display: grid; grid-template-columns: repeat(3, 40px); grid-template-rows: repeat(2, 40px); gap: 6px;
+  grid-template-areas: ". w ." "a s d"; margin: 12px 0 0;
+}
+.keypad .key {
+  display: grid; place-items: center; border: 1px solid var(--border); border-radius: 8px;
+  font: 600 14px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+}
+.keypad .key[data-held="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.teleop-notice { margin-top: 12px; padding-left: 8px; border-left: 3px solid var(--warn); color: var(--text); }

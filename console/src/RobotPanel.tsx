@@ -1,18 +1,20 @@
-// Detail pane for the selected robot. Today it shows identity, presence, FSM
-// state and the latest pose. It is the slot for two follow-ups:
-//   - manifest-driven detail: render only the capability sections the robot's
-//     manifest declares (no capability, no UI);
-//   - teleop controls: take over / WASD / hand back, shown when the manifest
-//     declares a drive contract.
-// Both read the same `robot` prop; add them as sections below.
+// Detail pane for the selected robot: identity, presence, FSM state, the
+// latest pose, and the teleop section when the manifest declares a twist
+// drive. Still to come: manifest-driven detail, rendering only the capability
+// sections the robot's manifest declares (no capability, no UI).
+import type { FleetClient } from "@fleet-platform/sdk";
 import { displayName, poseOf, type RobotView } from "./fleet/model";
+import { TeleopPanel } from "./teleop/TeleopPanel";
 
 interface Props {
+  client: FleetClient;
+  /** This console's operator id (welcome.client_id), to tell our lease from others'. */
+  operatorId: string | undefined;
   robot: RobotView | undefined;
   onClose: () => void;
 }
 
-export function RobotPanel({ robot, onClose }: Props) {
+export function RobotPanel({ client, operatorId, robot, onClose }: Props) {
   if (!robot) {
     return (
       <aside className="robot-panel empty" aria-label="Robot detail">
@@ -49,6 +51,9 @@ export function RobotPanel({ robot, onClose }: Props) {
           </>
         )}
       </dl>
+      {robot.manifest?.drive?.type === "twist" && (
+        <TeleopPanel key={robot.robot_id} client={client} robot={robot} operatorId={operatorId} />
+      )}
     </aside>
   );
 }
