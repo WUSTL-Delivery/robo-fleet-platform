@@ -49,13 +49,16 @@ import random
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, Union
+from typing import TYPE_CHECKING, Any, Literal, Union
 
 from websockets.asyncio.client import ClientConnection, connect as ws_connect
 from websockets.exceptions import ConnectionClosed, InvalidURI, WebSocketException
 from websockets.protocol import State as WsState
 
 from .token_store import Credentials, MemoryTokenStore, TokenStore
+
+if TYPE_CHECKING:
+    from .channel import Channel
 
 __all__ = [
     "PROTOCOL_VERSION",
@@ -287,6 +290,12 @@ class FleetClient:
     def on_state(self, handler: Handler) -> Callable[[], None]:
         """Calls ``handler(StateChange)`` on every connection-state change."""
         return _add(self._state_handlers, handler)
+
+    def channel(self, name: str) -> Channel:
+        """A view of domain channel ``name``: ``publish`` / ``on_message``. See fleet/channel.py."""
+        from .channel import Channel
+
+        return Channel(self, name)
 
     # ------------------------------------------------------------------ internals
 
