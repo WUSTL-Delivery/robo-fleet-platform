@@ -1,5 +1,5 @@
-// Package web mounts the HTTP surface: /ws for clients, /healthz, and (with the
-// console milestone) the static console + HTTP API.
+// Package web mounts the HTTP surface: /ws for clients, /healthz, the admin
+// API, and the embedded console at /.
 package web
 
 import (
@@ -22,12 +22,16 @@ func Handler(gw *gateway.Gateway, admin ...http.Handler) http.Handler {
 		w.Write([]byte(`{"ok":true}`))
 	})
 	mux.HandleFunc("/ws", gw.ServeWS)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Write([]byte("fleet-platform server (console lands with the vertical slice)\n"))
-	})
+	if console, ok := consoleHandler(embeddedConsole()); ok {
+		mux.Handle("/", console)
+	} else {
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Write([]byte("fleet-server: console not built into this binary (build it with the Dockerfile, or `npm run embed` in console/)\n"))
+		})
+	}
 	return mux
 }
