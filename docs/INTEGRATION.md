@@ -71,7 +71,7 @@ Endpoints:
 |------------|-------------------------------------------------------------|
 | `/ws`      | the only client endpoint; every robot, service, operator     |
 | `/healthz` | `{"ok":true}`                                               |
-| `/`        | placeholder until the console lands                         |
+| `/`        | the ops console, when it is embedded in the build (§8)     |
 
 Running `-bootstrap` again on an existing fleet mints another enrollment key for it. Keys
 are reusable until revoked and do not expire in v0 (see §8), so treat the key as a
@@ -304,7 +304,7 @@ that make it a delivery robot:
 | Escalate when a leg fails (policy is club code) | `help.request {reason, context}` |
 | Stop autonomy on takeover | on `lease.granted`, cancel the active Nav2 goal; on `lease.revoked`, report leg invalidated and wait for a new assignment |
 
-Until `fleet_agent` exists, the robot side is the raw protocol as in §5.
+Until `fleet_agent` exists, the robot side is the Python SDK used directly, as in §5.
 
 ---
 
@@ -421,90 +421,84 @@ request/ack helper for channels.
 
 ## 5. Worked example: a robot in Python
 
-The same server from the robot side, using the `websockets` package
-(`pip install websockets`). This is what `fleet_agent` will do internally; the club node
-is the `on_assignment` and `on_leg_done` parts.
+The robot side uses the Python SDK in `sdk/python` (`pip install -e sdk/python` from a
+checkout; not on PyPI yet). It owns the socket, enrollment, heartbeat, reconnect, the
+manifest, the lease check on twist, and the deadman. This is what `fleet_agent` will
+build on; the club node is the `on_assignment` and leg-reporting parts.
+
+The generic, runnable version (no ROS, no delivery vocabulary) is
+[`sdk/python/examples/robot.py`](../sdk/python/examples/robot.py), and
+[`sdk/python/README.md`](../sdk/python/README.md) walks through running it against a
+local server. Here is the same shape as the club robot would use it:
 
 ```python
-# robot.py — FLEET_URL, FLEET_ENROLL_KEY or FLEET_TOKEN as in the TS example
-import asyncio, json, os, time
-import websockets
+# robot.py — env: FLEET_URL, FLEET_ENROLL_KEY (first run only)
+import asyncio, os
+from fleet import FileTokenStore, Robot, geo_pose
 
-URL = os.environ.get("FLEET_URL", "ws://localhost:8080/ws")
+robot = Robot(
+    os.environ.get("FLEET_URL", "ws://localhost:8080/ws"),
+    # Capability manifest: the console renders exactly this, nothing more.
+    manifest={
+        "drive": {"type": "twist", "max_v_mps": 1.5, "max_w_radps": 2.0},
+        "cameras": [{"id": "front", "label": "RealSense RGB"}],
+        "battery": {},
+        "channels": ["assignment", "edge_report"],   # domain channels the club node speaks
+    },
+    name="delivery-01",
+    enrollment_key=os.environ.get("FLEET_ENROLL_KEY"),         # used once
+    token_store=FileTokenStore("/var/lib/fleet_agent/token.json"),  # same robot id across restarts
+)
+assignment = robot.channel("assignment")
+edge_report = robot.channel("edge_report")
 
-def envelope(type_, payload, id_=None):
-    return json.dumps({"v": 0, "type": type_, "id": id_, "ts_ms": int(time.time() * 1000), "payload": payload})
+async def on_assignment(sender, data):
+    # club node: ack, then run Nav2 legs. Idempotent on data["seq"].
+    await assignment.publish({"ack": data["seq"]}, to=sender)
+    # ... per completed leg:
+    await edge_report.publish({"edge_id": "e12", "seconds": 41.5})   # broadcast
+    # ... when a leg fails past the club's escalation policy:
+    await robot.request_help("nav_goal_failed", {"attempts": 3})
 
-async def enroll(key):
-    async with websockets.connect(URL) as ws:
-        await ws.send(envelope("enroll.request", {"enrollment_key": key, "kind": "robot", "name": "delivery-01",
-                                                  "agent": {"name": "fleet_agent", "version": "0.0.1"}}))
-        env = json.loads(await ws.recv())
-        assert env["type"] == "enroll.response", env
-        return env["payload"]["token"]
-
-async def heartbeat(ws, interval_ms):
-    while True:
-        await asyncio.sleep(interval_ms / 1000)
-        await ws.send(envelope("heartbeat", {}))
-
-async def telemetry(ws):
-    while True:  # ~1 Hz is plenty for the control plane; video never rides this socket
-        await ws.send(envelope("telemetry", {
-            "pose": {"frame": "geographic", "lat": 38.6488, "lon": -90.3108, "yaw_rad": 1.57},
-            "velocity": {"v_mps": 0.0, "w_radps": 0.0},
-            "battery": {"pct": 87.5},
-            "health": {"gps_fix": "rtk_fixed"},
-        }))
-        await asyncio.sleep(1)
+assignment.on_message(on_assignment)
+# Lease-gated, fail-closed twist: operator setpoints, plus zero-velocity stops from the
+# deadman (300 ms without a valid twist), a revoke, or a lost link.
+robot.on_twist(lambda cmd: cmd_vel.publish(cmd.linear_x, cmd.angular_z))
+# Granted: cancel the active Nav2 goal. Revoked: report the leg invalidated, await a new assignment.
+robot.on_lease(lambda change: nav.cancel() if change.granted else nav.invalidate_leg())
 
 async def main():
-    token = os.environ.get("FLEET_TOKEN") or await enroll(os.environ["FLEET_ENROLL_KEY"])
-    print("token (store this):", token)
-    lease_id = None  # twist is only obeyed while this matches; deadman stops the base otherwise
-
-    async with websockets.connect(URL) as ws:
-        await ws.send(envelope("hello", {"token": token}))
-        welcome = json.loads(await ws.recv())
-        assert welcome["type"] == "welcome", welcome
-
-        # Capability manifest: the console renders exactly this, nothing more.
-        await ws.send(envelope("manifest", {
-            "drive": {"type": "twist", "max_v_mps": 1.5, "max_w_radps": 2.0},
-            "cameras": [{"id": "front", "label": "RealSense RGB"}],
-            "battery": {},
-            "channels": ["assignment", "edge_report"],   # domain channels the club node speaks
-        }))
-        asyncio.create_task(heartbeat(ws, welcome["payload"]["heartbeat_interval_ms"]))
-        asyncio.create_task(telemetry(ws))
-
-        async for raw in ws:
-            env = json.loads(raw)
-            p = env["payload"]
-            if env["type"] == "channel.message" and p["channel"] == "assignment":
-                # club node: ack, then run Nav2 legs. Idempotent on data["seq"].
-                await ws.send(envelope("channel.publish", {"channel": "assignment", "to": p["from"], "data": {"ack": p["data"]["seq"]}}))
-                # ... per completed leg:
-                await ws.send(envelope("channel.publish", {"channel": "edge_report", "broadcast": True,
-                                                            "data": {"edge_id": "e12", "seconds": 41.5}}))
-                # ... when a leg fails past the club's escalation policy:
-                await ws.send(envelope("help.request", {"reason": "nav_goal_failed", "context": {"attempts": 3}}))
-            elif env["type"] == "lease.granted":
-                lease_id = p["lease_id"]     # cancel the active Nav2 goal here; operator has the wheel
-            elif env["type"] == "lease.revoked":
-                lease_id = None              # zero velocity now; report leg invalidated; await a fresh assignment
-            elif env["type"] == "twist":
-                if p["lease_id"] == lease_id:
-                    pass                     # publish to the top-priority input of the twist mux
-            elif env["type"] == "error":
-                print("server error:", p)
+    await robot.connect()
+    async def telemetry():   # ~1 Hz is plenty for the control plane; video never rides this socket
+        while True:
+            await robot.telemetry(pose=geo_pose(38.6488, -90.3108, yaw_rad=1.57), battery=87.5,
+                                  velocity={"v_mps": 0.0, "w_radps": 0.0}, health={"gps_fix": "rtk_fixed"})
+            await asyncio.sleep(1)
+    asyncio.create_task(telemetry())
+    await robot.run_forever()   # heartbeats; reconnects with backoff, same token
 
 asyncio.run(main())
 ```
 
-Two things the real `fleet_agent` must add that this sketch omits: a ~300 ms deadman that
-zeroes velocity when no valid twist arrives during `TELEOP`, and reconnect with backoff
-using the same token. Neither depends on the server being reachable.
+`cmd_vel` and `nav` stand in for the ROS side. What the SDK already does, so the club node
+does not: re-sends the manifest and renews channel subscriptions on every reconnect,
+drops telemetry while the link is down instead of queueing it, ignores twist that does
+not carry the current lease id, and stops the base locally on deadman, revoke, or
+disconnect without waiting for the server. A `conflict` (a second process using the same
+token) or `auth_failed` (revoked token, wrong key) is terminal and `run_forever()` raises
+it.
+
+### 5.1 Wire level, for other languages
+
+The SDK adds nothing to the wire. A robot in another language speaks §2 directly:
+`enroll.request` once on a throwaway socket and keep the token; then on every connect
+`hello` → `welcome`, `manifest`, a `heartbeat` every `welcome.heartbeat_interval_ms`,
+`telemetry` as it likes, and `help.request` to raise its hand. It obeys `twist` only while
+`lease_id` matches the last `lease.granted` for it, zeroes velocity ~300 ms after the last
+valid twist and immediately on `lease.revoked` or a dropped socket, and reconnects with
+backoff using the same token. `sdk/python/fleet/robot.py` and `client.py` are a readable
+reference implementation (about 1,000 lines together, mostly comments and edge cases); the schemas in `protocol/schemas/`
+and `TestIntegrationStoryline` (§9) are the authority.
 
 ---
 
@@ -595,9 +589,9 @@ Read this before designing against the server. Each item is a known gap, not a h
 
 | Gap | Consequence for you | Where it lands |
 |---|---|---|
-| **No SDKs.** `sdk/` does not exist yet | speak raw JSON as in §4 and §5; the SDKs will wrap exactly these messages | D12: TypeScript first, then Python, then `fleet_agent` |
-| **No operator enrollment or console auth.** `enroll.request` accepts only `robot` and `service`; operator tokens can only be created in the store today | you cannot yet put a human at the wheel from outside a test; operator flows are exercised by the Go integration tests | console milestone (roadmap step 1) |
-| **No console** | `/` is a placeholder; layers and telemetry have nowhere to render yet | vertical slice |
+| **SDKs are source-only, and there is no ROS 2 node yet.** `sdk/typescript` and `sdk/python` exist (§5), but neither is published to npm or PyPI, and `fleet_agent` (`sdk/ros2`) is not written | install from a checkout (`pip install -e sdk/python`); a ROS robot wires the Python SDK's `on_twist` / `on_lease` / `telemetry` to its topics by hand until `fleet_agent` does it | package publishing with the project rename; `fleet_agent` in the real-hardware phase |
+| **Operator access is invite-only, from the CLI.** Operators redeem a single-use, expiring invite minted by `fleetctl invite operator` (D14), which needs the server's `FLEET_ADMIN_TOKEN`. There are no passwords, no roles, and no way to mint an invite from the console | whoever holds the admin token onboards every operator; an operator's token lives in their browser, and losing it means a new invite | console-side invites through the same admin API, later |
+| **The console is basic.** It shows robots live on a map, renders what each manifest declares, and does take over / WASD / hand back. It does not render declared map layers yet, and a plain `go build` does not include it (`npm run embed` in `console/`, or the Docker image) | a service's layers have nowhere to show yet; build the image or embed the console before pointing an operator at `/` | layer rendering with the layer-streams work |
 | **Layers are not retained** | a service must re-declare and re-send after it reconnects, and a console that connects later sees nothing until the next update | console milestone |
 | **Enrollment keys never expire and are reusable** | treat the key as a long-lived secret; adding a new one is a config change, revoking the old one is a DB edit | admin surface, later |
 | **No rate limiting beyond the 64 KB payload cap and the 64-deep send queue** | a chatty telemetry loop will be disconnected for overflow before it is throttled | fan-out work |
