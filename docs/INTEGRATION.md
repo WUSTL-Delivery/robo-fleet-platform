@@ -75,9 +75,22 @@ Endpoints:
 | `/healthz` | `{"ok":true}`                                               |
 | `/`        | the ops console, when it is embedded in the build (§8)     |
 
-Running `-bootstrap` again on an existing fleet mints another enrollment key for it. Keys
-are reusable until revoked and do not expire in v0 (see §8), so treat the key as a
-secret: it lets anyone register a robot or service into your fleet.
+Running `-bootstrap` again on an existing fleet mints another enrollment key for it. An
+enrollment key is reusable until it is revoked or expires, so treat it as a secret: it
+lets anyone register a robot or service into your fleet. Keys are managed at runtime
+with `fleetctl` against the admin API (`FLEET_ADMIN_TOKEN`, D14), never by editing the
+database:
+
+```bash
+fleetctl enroll-key create --fleet club-fleet [--ttl 720h]   # no --ttl: never expires
+fleetctl enroll-key list   --fleet club-fleet                # id, state, created, expires, revoked
+fleetctl enroll-key revoke --fleet club-fleet ek_...         # stops new enrollments with it
+```
+
+Revoking or expiring a key only stops **new** enrollments (`enroll.request` answers
+`auth_failed`, the same as an unknown key). Clients that already enrolled with it keep
+their tokens. Keys minted by `-bootstrap`, by `FLEET_BOOTSTRAP_ENROLL_KEY`, or before
+expiry existed never expire.
 
 From the published image, with no config file (every key has a `FLEET_*` environment
 variable; env beats file beats default):
@@ -92,7 +105,10 @@ docker run --rm -p 8080:8080 -v fleet-data:/var/lib/fleet \
 The two `FLEET_BOOTSTRAP_*` variables are the declarative alternative to `-bootstrap`:
 you choose the key (at least 16 characters), and on every start the server makes sure the
 fleet exists and the key is registered for it. Idempotent, so it belongs in a compose file
-or a CI secret; the clients that will enroll get the same value.
+or a CI secret; the clients that will enroll get the same value. Revocation wins over
+the environment: once that key is revoked with `fleetctl enroll-key revoke`, a restart
+does not re-register it, and the server logs a warning that `FLEET_BOOTSTRAP_ENROLL_KEY`
+names a revoked key. To rotate, set a new value; the old key keeps working until revoked.
 
 `fleet-server -version` prints the stamped release; `fleet-server -healthcheck` is what
 the image's HEALTHCHECK runs. Tags and the release process are in `docs/RELEASING.md`.
@@ -607,7 +623,6 @@ Read this before designing against the server. Each item is a known gap, not a h
 | **Operator access is invite-only, from the CLI.** Operators redeem a single-use, expiring invite minted by `fleetctl invite operator` (D14), which needs the server's `FLEET_ADMIN_TOKEN`. There are no passwords, no roles, and no way to mint an invite from the console | whoever holds the admin token onboards every operator; an operator's token lives in their browser, and losing it means a new invite | console-side invites through the same admin API, later |
 | **The console is basic.** It shows robots live on a map, renders what each manifest declares, and does take over / WASD / hand back. It does not render declared map layers yet, and a plain `go build` does not include it (`npm run embed` in `console/`, or the Docker image) | a service's layers have nowhere to show yet; build the image or embed the console before pointing an operator at `/` | layer rendering with the layer-streams work |
 | **Layer retention is in memory only** | the server replays each layer's latest declare and update to late `layers` subscribers, but a server restart forgets them, and a service's layers are dropped 5 minutes after it disconnects, so re-declare and re-send on every (re)connect | persisting layers in the store, if a deployment needs it |
-| **Enrollment keys never expire and are reusable** | treat the key as a long-lived secret; adding a new one is a config change, revoking the old one is a DB edit | admin surface, later |
 | **Rate limits are per connection and per type, not per subscriber** | a chatty `telemetry` or `channel.publish` loop is throttled (§2.8), not disconnected; a slow *reader* still overflows its 64-deep send queue and is dropped | per-subscriber fan-out limits, later |
 | **Twist rides the bus as a fallback**; no WebRTC media, no TURN | fine for sim and for testing the club node's lease handling; not for driving a real robot | roadmap step 3 |
 | **No replay / black-box recording** | | later milestone |

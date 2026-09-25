@@ -3,6 +3,9 @@
 //	fleetctl login --server https://fleet.example.org --token <admin token>
 //	fleetctl login --server https://fleet.example.org   # token read from stdin
 //	fleetctl invite operator --fleet club [--ttl 24h]
+//	fleetctl enroll-key create --fleet club [--ttl 720h]
+//	fleetctl enroll-key list --fleet club
+//	fleetctl enroll-key revoke --fleet club <key id>
 //	fleetctl --version
 //
 // fleetctl only talks HTTP to the server's admin API (FLEET_ADMIN_TOKEN on the
@@ -43,6 +46,12 @@ Usage:
       Save the server URL and admin token (token read from stdin if omitted).
   fleetctl invite operator --fleet <name> [--ttl 24h]
       Mint a single-use operator invite key and print it with the console URL.
+  fleetctl enroll-key create --fleet <name> [--ttl 720h]
+      Mint an enrollment key for robots and services (never expires without --ttl).
+  fleetctl enroll-key list --fleet <name>
+      List a fleet's enrollment keys: id, state, created, expires, revoked.
+  fleetctl enroll-key revoke --fleet <name> <key id>
+      Stop new enrollments with a key. Clients already enrolled keep their tokens.
   fleetctl version | --version
       Print the fleetctl version.
 
@@ -72,6 +81,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = cmdLogin(args[1:], stdin, stdout, stderr)
 	case "invite":
 		err = cmdInvite(args[1:], stdout, stderr)
+	case "enroll-key":
+		err = cmdEnrollKey(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "fleetctl: unknown command %q\n\n%s", args[0], usage)
 		return 2
@@ -270,30 +281,13 @@ func cmdInvite(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	var body []byte
+	var body any
 	if *ttl > 0 {
-		body, _ = json.Marshal(map[string]string{"ttl": ttl.String()})
+		body = map[string]string{"ttl": ttl.String()}
 	}
-	endpoint := cfg.Server + "/api/admin/fleets/" + url.PathEscape(*fleet) + "/operator-invites"
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	raw, err := adminCall(cfg, http.MethodPost, "/api/admin/fleets/"+url.PathEscape(*fleet)+"/operator-invites", body, *fleet)
 	if err != nil {
 		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Token)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("cannot reach %s: %w", cfg.Server, err)
-	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return apiError(resp, raw, *fleet)
 	}
 	var inv inviteResponse
 	if err := json.Unmarshal(raw, &inv); err != nil || inv.Key == "" {
@@ -304,6 +298,41 @@ func cmdInvite(args []string, stdout, stderr io.Writer) error {
 	fmt.Fprintf(stdout, "    %s\n\n", inv.Key)
 	fmt.Fprintf(stdout, "Open the console at %s/ and paste the key on the login screen.\n", cfg.Server)
 	return nil
+}
+
+// adminCall sends one admin API request (body is JSON-encoded unless nil) and
+// returns the raw 200 response body, or an error worded for the terminal.
+// fleet names the fleet in the path, for error messages.
+func adminCall(cfg config, method, path string, body any, fleet string) ([]byte, error) {
+	var reqBody io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		reqBody = bytes.NewReader(data)
+	}
+	req, err := http.NewRequest(method, cfg.Server+path, reqBody)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("cannot reach %s: %w", cfg.Server, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, apiError(resp, raw, fleet)
+	}
+	return raw, nil
 }
 
 func apiError(resp *http.Response, raw []byte, fleet string) error {
