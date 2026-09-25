@@ -116,7 +116,7 @@ steps 1–2 done, plus a quickstart, so members onboard onto a working platform.
 - Project name (repo is placeholder-named `fleet-platform`; rename before SDK
   imports spread).
 - License: Apache-2.0 is the working default (patent grant matters for infra).
-- Server/console tech stack: not yet chosen — pick during vertical slice. Whatever
-  is chosen, the protocol stays language-neutral (JSON Schema).
+- ~~Server/console tech stack~~ settled: Go server (D10/D13), console is Vite + React +
+  MapLibre (D15). The protocol stays language-neutral (JSON Schema).
 - What (if anything) to port from `../delivery-gdg-platform/apps/authoritative` and
   `apps/command` — they are conceptually the command server's ancestors.
