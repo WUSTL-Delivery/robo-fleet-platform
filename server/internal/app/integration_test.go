@@ -382,4 +382,99 @@ func TestIntegrationLeaseExpiry(t *testing.T) {
 	}
 }
 
+// enrollOperatorInvite sends an operator enroll.request carrying an invite
+// key over a fresh websocket and returns the first reply envelope.
+func (h *harness) enrollOperatorInvite(inviteKey, name string) protocol.Envelope {
+	h.t.Helper()
+	c := h.dial()
+	c.send(protocol.TypeEnrollRequest, protocol.EnrollRequest{
+		EnrollmentKey: inviteKey, Kind: "operator", Name: name,
+	})
+	env, err := c.recv()
+	if err != nil {
+		h.t.Fatalf("operator enroll reply: %v", err)
+	}
+	return env
+}
+
+func expectInviteEnrollError(t *testing.T, env protocol.Envelope, code string) {
+	t.Helper()
+	if env.Type != protocol.TypeError {
+		t.Fatalf("want error %q, got %s: %s", code, env.Type, env.Payload)
+	}
+	var e protocol.ErrorMsg
+	mustUnmarshal(t, env.Payload, &e)
+	if e.Code != code {
+		t.Fatalf("error code = %q (%s), want %q", e.Code, e.Message, code)
+	}
+}
+
+// TestIntegrationOperatorInviteEnroll: an operator redeems a one-time invite
+// over the real enroll flow (DESIGN.md D14), connects with the minted token and
+// takes the wheel. The invite is single use.
+func TestIntegrationOperatorInviteEnroll(t *testing.T) {
+	h := newHarness(t, defaultConfig())
+	robotToken, robotClient, err := h.store.CreateToken(h.fleet.ID, store.KindRobot, "sim-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	invite, _, err := h.store.CreateOperatorInvite(h.fleet.ID, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env := h.enrollOperatorInvite(invite, "op-invited")
+	if env.Type != protocol.TypeEnrollResponse {
+		t.Fatalf("operator enroll: got %s: %s", env.Type, env.Payload)
+	}
+	var enrolled protocol.EnrollResponse
+	mustUnmarshal(t, env.Payload, &enrolled)
+	if enrolled.FleetID != h.fleet.ID || enrolled.Token == "" || !strings.HasPrefix(enrolled.ClientID, "o_") {
+		t.Fatalf("operator enroll response: %+v", enrolled)
+	}
+
+	robot := h.connect(robotToken)
+	robot.send(protocol.TypeHelpRequest, protocol.HelpRequest{Reason: "stuck"})
+
+	operator := h.dial()
+	operator.send(protocol.TypeHello, protocol.Hello{Token: enrolled.Token})
+	var welcome protocol.Welcome
+	mustUnmarshal(t, operator.expect(protocol.TypeWelcome).Payload, &welcome)
+	if welcome.Kind != "operator" || welcome.ClientID != enrolled.ClientID {
+		t.Fatalf("welcome: %+v", welcome)
+	}
+
+	operator.send(protocol.TypeLeaseClaim, protocol.LeaseClaim{RobotID: robotClient.ID})
+	var opLease, robotLease protocol.Lease
+	mustUnmarshal(t, operator.expect(protocol.TypeLeaseGranted).Payload, &opLease)
+	mustUnmarshal(t, robot.expect(protocol.TypeLeaseGranted).Payload, &robotLease)
+	if opLease.LeaseID != robotLease.LeaseID || opLease.OperatorID != enrolled.ClientID {
+		t.Fatalf("lease: op=%+v robot=%+v", opLease, robotLease)
+	}
+
+	// Single use: the same invite cannot mint a second operator.
+	expectInviteEnrollError(t, h.enrollOperatorInvite(invite, "op-again"), protocol.ErrConflict)
+}
+
+// TestIntegrationOperatorInviteRejected: unknown and expired invites are auth
+// failures, and a fleet enrollment key cannot mint an operator.
+func TestIntegrationOperatorInviteRejected(t *testing.T) {
+	h := newHarness(t, defaultConfig())
+
+	expectInviteEnrollError(t, h.enrollOperatorInvite("fp-oi-not-a-real-invite", "op"), protocol.ErrAuthFailed)
+
+	expired, _, err := h.store.CreateOperatorInvite(h.fleet.ID, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	expectInviteEnrollError(t, h.enrollOperatorInvite(expired, "op"), protocol.ErrAuthFailed)
+
+	enrollKey, err := h.store.CreateEnrollKey(h.fleet.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectInviteEnrollError(t, h.enrollOperatorInvite(enrollKey, "op"), protocol.ErrAuthFailed)
+}
+
 func f(v float64) *float64 { return &v }

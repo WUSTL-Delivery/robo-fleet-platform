@@ -6,6 +6,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -86,8 +87,12 @@ func (a *App) Run(ctx context.Context) {
 // --- gateway.Auth ---
 
 func (a *App) Enroll(req protocol.EnrollRequest) (protocol.EnrollResponse, *protocol.ErrorMsg) {
-	if req.Kind != string(store.KindRobot) && req.Kind != string(store.KindService) {
-		return protocol.EnrollResponse{}, &protocol.ErrorMsg{Code: protocol.ErrInvalidMessage, Message: "kind must be robot or service"}
+	switch req.Kind {
+	case string(store.KindOperator):
+		return a.enrollOperator(req)
+	case string(store.KindRobot), string(store.KindService):
+	default:
+		return protocol.EnrollResponse{}, &protocol.ErrorMsg{Code: protocol.ErrInvalidMessage, Message: "kind must be robot, service, or operator"}
 	}
 	fleetID, ok, err := a.st.AuthEnroll(req.EnrollmentKey)
 	if err != nil || !ok {
@@ -98,6 +103,27 @@ func (a *App) Enroll(req protocol.EnrollRequest) (protocol.EnrollResponse, *prot
 		return protocol.EnrollResponse{}, &protocol.ErrorMsg{Code: protocol.ErrInvalidMessage, Message: "enrollment failed"}
 	}
 	return protocol.EnrollResponse{Token: token, ClientID: client.ID, FleetID: client.FleetID}, nil
+}
+
+// enrollOperator redeems a single-use operator invite (DESIGN.md D14). The
+// invite rides in enrollment_key; the fleet comes from the invite, not the
+// request. A used invite is a conflict (the key was real once); unknown and
+// expired invites are plain auth failures.
+func (a *App) enrollOperator(req protocol.EnrollRequest) (protocol.EnrollResponse, *protocol.ErrorMsg) {
+	token, client, err := a.st.RedeemOperatorInvite(req.EnrollmentKey, req.Name)
+	switch {
+	case err == nil:
+		return protocol.EnrollResponse{Token: token, ClientID: client.ID, FleetID: client.FleetID}, nil
+	case errors.Is(err, store.ErrInviteInvalid):
+		return protocol.EnrollResponse{}, &protocol.ErrorMsg{Code: protocol.ErrAuthFailed, Message: "invalid invite key"}
+	case errors.Is(err, store.ErrInviteExpired):
+		return protocol.EnrollResponse{}, &protocol.ErrorMsg{Code: protocol.ErrAuthFailed, Message: "invite key expired"}
+	case errors.Is(err, store.ErrInviteUsed):
+		return protocol.EnrollResponse{}, &protocol.ErrorMsg{Code: protocol.ErrConflict, Message: "invite key already redeemed"}
+	default:
+		slog.Error("app: operator invite redemption failed", "err", err)
+		return protocol.EnrollResponse{}, &protocol.ErrorMsg{Code: protocol.ErrInvalidMessage, Message: "enrollment failed"}
+	}
 }
 
 func (a *App) Hello(h protocol.Hello) (store.Client, *protocol.ErrorMsg) {
