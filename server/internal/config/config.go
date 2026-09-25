@@ -28,10 +28,17 @@ type Config struct {
 	// instead of minting one on the box with -bootstrap. Idempotent.
 	BootstrapFleet     string `yaml:"bootstrap_fleet"`
 	BootstrapEnrollKey string `yaml:"bootstrap_enroll_key"`
+
+	// AdminToken authenticates the admin HTTP API that fleetctl calls
+	// (DESIGN.md D14). Empty (the default) leaves the admin API unmounted.
+	AdminToken string `yaml:"admin_token"`
 }
 
 // MinEnrollKeyLen guards against seeding a guessable key.
 const MinEnrollKeyLen = 16
+
+// MinAdminTokenLen guards against a guessable admin token.
+const MinAdminTokenLen = 16
 
 func Default() Config {
 	return Config{
@@ -71,6 +78,7 @@ const (
 	EnvSweepMs             = "FLEET_SWEEP_MS"
 	EnvBootstrapFleet      = "FLEET_BOOTSTRAP_FLEET"
 	EnvBootstrapEnrollKey  = "FLEET_BOOTSTRAP_ENROLL_KEY"
+	EnvAdminToken          = "FLEET_ADMIN_TOKEN"
 )
 
 func (c *Config) applyEnv(lookup func(string) (string, bool)) error {
@@ -85,6 +93,9 @@ func (c *Config) applyEnv(lookup func(string) (string, bool)) error {
 	}
 	if v, ok := lookup(EnvBootstrapEnrollKey); ok {
 		c.BootstrapEnrollKey = v
+	}
+	if v, ok := lookup(EnvAdminToken); ok {
+		c.AdminToken = v
 	}
 	for _, e := range []struct {
 		name string
@@ -123,12 +134,17 @@ func (c Config) validate() (Config, error) {
 		return c, fmt.Errorf("config: bootstrap_fleet and bootstrap_enroll_key must be set together")
 	case c.BootstrapEnrollKey != "" && len(c.BootstrapEnrollKey) < MinEnrollKeyLen:
 		return c, fmt.Errorf("config: bootstrap_enroll_key must be at least %d characters", MinEnrollKeyLen)
+	case c.AdminToken != "" && len(c.AdminToken) < MinAdminTokenLen:
+		return c, fmt.Errorf("config: admin_token must be at least %d characters", MinAdminTokenLen)
 	}
 	return c, nil
 }
 
 // Bootstrap reports whether declarative bootstrap is configured.
 func (c Config) Bootstrap() bool { return c.BootstrapFleet != "" }
+
+// AdminEnabled reports whether the admin API should be mounted.
+func (c Config) AdminEnabled() bool { return c.AdminToken != "" }
 
 func (c Config) HeartbeatInterval() time.Duration {
 	return time.Duration(c.HeartbeatIntervalMs) * time.Millisecond

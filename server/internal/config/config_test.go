@@ -69,3 +69,25 @@ func TestBootstrapPairValidation(t *testing.T) {
 		t.Fatal("Bootstrap() should be true")
 	}
 }
+
+func TestAdminTokenFromEnvAndLength(t *testing.T) {
+	cfg := Default()
+	if cfg.AdminEnabled() {
+		t.Fatal("admin API must be off by default")
+	}
+	if err := cfg.applyEnv(lookupFrom(map[string]string{EnvAdminToken: "short"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.validate(); err == nil {
+		t.Fatal("short admin token should fail")
+	}
+	if err := cfg.applyEnv(lookupFrom(map[string]string{EnvAdminToken: "fp-admin-0123456789abcdef"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AdminEnabled() || cfg.AdminToken != "fp-admin-0123456789abcdef" {
+		t.Fatalf("admin token not applied: %+v", cfg)
+	}
+}

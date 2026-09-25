@@ -8,8 +8,15 @@ import (
 	"fleetplatform/server/internal/gateway"
 )
 
-func Handler(gw *gateway.Gateway) http.Handler {
+// Handler builds the mux. admin, when non-nil, is mounted at /api/admin/
+// (internal/admin; nil means the admin API is off).
+func Handler(gw *gateway.Gateway, admin ...http.Handler) http.Handler {
 	mux := http.NewServeMux()
+	for _, h := range admin {
+		if h != nil {
+			mux.Handle("/api/admin/", h)
+		}
+	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))

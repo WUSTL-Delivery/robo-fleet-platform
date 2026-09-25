@@ -13,3 +13,8 @@ lease_ttl_ms: 15000
 
 # How often the server sweeps for lapsed heartbeats and expired leases.
 sweep_ms: 1000
+
+# Admin API (fleetctl): POST /api/admin/... authenticated by this bearer token.
+# Leave unset to keep the admin API off. Prefer FLEET_ADMIN_TOKEN over putting
+# the secret in this file. At least 16 characters.
+# admin_token: ""

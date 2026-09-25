@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"fleetplatform/server/internal/admin"
 	"fleetplatform/server/internal/app"
 	"fleetplatform/server/internal/config"
 	"fleetplatform/server/internal/store"
@@ -95,7 +96,10 @@ func main() {
 	defer stop()
 	go a.Run(ctx)
 
-	srv := &http.Server{Addr: cfg.Listen, Handler: web.Handler(a.Gateway())}
+	if cfg.AdminEnabled() {
+		slog.Info("admin API enabled", "path", "/api/admin/")
+	}
+	srv := &http.Server{Addr: cfg.Listen, Handler: web.Handler(a.Gateway(), admin.Handler(st, cfg.AdminToken))}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
