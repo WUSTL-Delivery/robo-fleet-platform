@@ -3,6 +3,11 @@
 // describes the robots; nothing domain-shaped lands here.
 package store
 
+import (
+	"errors"
+	"time"
+)
+
 type Kind string
 
 const (
@@ -23,6 +28,14 @@ type Client struct {
 	Name    string
 }
 
+// Operator invite redemption failures. Callers map all three to one generic
+// auth error on the wire; the distinction is for logs and admin tooling.
+var (
+	ErrInviteInvalid = errors.New("store: operator invite not found")
+	ErrInviteUsed    = errors.New("store: operator invite already redeemed")
+	ErrInviteExpired = errors.New("store: operator invite expired")
+)
+
 type Store interface {
 	CreateFleet(name string) (Fleet, error)
 	FleetByName(name string) (Fleet, bool, error)
@@ -42,6 +55,15 @@ type Store interface {
 	// AuthToken resolves a presented token to its client; identity is always
 	// derived server-side from the credential, never claimed.
 	AuthToken(token string) (Client, bool, error)
+
+	// CreateOperatorInvite mints a single-use operator invite key for a fleet,
+	// valid for ttl (must be > 0). The plaintext is returned exactly once and
+	// only its hash is stored.
+	CreateOperatorInvite(fleetID string, ttl time.Duration) (key string, expiresAt time.Time, err error)
+	// RedeemOperatorInvite consumes an invite key and mints an operator client
+	// plus its token, atomically. A key redeems at most once; an unknown, used,
+	// or expired key returns ErrInviteInvalid, ErrInviteUsed, or ErrInviteExpired.
+	RedeemOperatorInvite(key, name string) (token string, c Client, err error)
 
 	RobotsInFleet(fleetID string) ([]Client, error)
 

@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -31,10 +33,20 @@ CREATE TABLE IF NOT EXISTS enroll_keys (
 	revoked    INTEGER NOT NULL DEFAULT 0,
 	created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
+CREATE TABLE IF NOT EXISTS operator_invites (
+	id         TEXT PRIMARY KEY,
+	fleet_id   TEXT NOT NULL REFERENCES fleets(id),
+	key_hash   TEXT NOT NULL UNIQUE,
+	expires_at INTEGER NOT NULL,          -- unix millis
+	used_at    INTEGER,                   -- unix millis; NULL until redeemed
+	client_id  TEXT REFERENCES clients(id),
+	created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
 `
 
 type Sqlite struct {
-	db *sql.DB
+	db  *sql.DB
+	now func() time.Time // injectable clock for invite expiry
 }
 
 func OpenSqlite(path string) (*Sqlite, error) {
@@ -48,7 +60,7 @@ func OpenSqlite(path string) (*Sqlite, error) {
 		db.Close()
 		return nil, fmt.Errorf("store: init schema: %w", err)
 	}
-	return &Sqlite{db: db}, nil
+	return &Sqlite{db: db, now: time.Now}, nil
 }
 
 func (s *Sqlite) Close() error { return s.db.Close() }
@@ -115,6 +127,69 @@ func (s *Sqlite) AuthToken(token string) (Client, bool, error) {
 	}
 	c.Kind = Kind(kind)
 	return c, err == nil, err
+}
+
+func (s *Sqlite) CreateOperatorInvite(fleetID string, ttl time.Duration) (string, time.Time, error) {
+	if ttl <= 0 {
+		return "", time.Time{}, fmt.Errorf("store: operator invite ttl must be positive, got %s", ttl)
+	}
+	key := "fp-oi-" + randHex(16)
+	expiresAt := s.now().Add(ttl).Truncate(time.Millisecond)
+	_, err := s.db.Exec(`INSERT INTO operator_invites (id, fleet_id, key_hash, expires_at) VALUES (?, ?, ?, ?)`,
+		"oi_"+randHex(8), fleetID, hashSecret(key), expiresAt.UnixMilli())
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return key, expiresAt, nil
+}
+
+func (s *Sqlite) RedeemOperatorInvite(key, name string) (string, Client, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", Client{}, err
+	}
+	defer tx.Rollback()
+
+	var id, fleetID string
+	var expiresAt int64
+	var usedAt sql.NullInt64
+	err = tx.QueryRow(`SELECT id, fleet_id, expires_at, used_at FROM operator_invites WHERE key_hash = ?`,
+		hashSecret(key)).Scan(&id, &fleetID, &expiresAt, &usedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", Client{}, ErrInviteInvalid
+	}
+	if err != nil {
+		return "", Client{}, err
+	}
+	now := s.now().UnixMilli()
+	if usedAt.Valid {
+		return "", Client{}, ErrInviteUsed
+	}
+	if now >= expiresAt {
+		return "", Client{}, ErrInviteExpired
+	}
+
+	token := "fp-tk-" + randHex(24)
+	c := Client{ID: idPrefix(KindOperator) + randHex(8), FleetID: fleetID, Kind: KindOperator, Name: name}
+	if _, err := tx.Exec(`INSERT INTO clients (id, fleet_id, kind, name, token_hash) VALUES (?, ?, ?, ?, ?)`,
+		c.ID, c.FleetID, string(c.Kind), c.Name, hashSecret(token)); err != nil {
+		return "", Client{}, err
+	}
+	// Guarded on used_at IS NULL so a racing redeem can never consume it twice.
+	res, err := tx.Exec(`UPDATE operator_invites SET used_at = ?, client_id = ? WHERE id = ? AND used_at IS NULL`,
+		now, c.ID, id)
+	if err != nil {
+		return "", Client{}, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return "", Client{}, err
+	} else if n != 1 {
+		return "", Client{}, ErrInviteUsed
+	}
+	if err := tx.Commit(); err != nil {
+		return "", Client{}, err
+	}
+	return token, c, nil
 }
 
 func (s *Sqlite) RobotsInFleet(fleetID string) ([]Client, error) {
