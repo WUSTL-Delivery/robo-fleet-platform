@@ -24,6 +24,27 @@
 //
 // Each on*/onState call returns an unsubscribe function.
 //
+// Snapshot-then-stream (docs/INTEGRATION.md §2.5) is built in on top of that:
+//
+//   await client.subscribe(["presence", "events"])  resolves with the snapshot
+//   client.onSnapshot(h)                  every snapshot, including reconnects
+//   client.onEvent(h) / onEvent(name, h)  `event` envelopes, data typed per name
+//   client.onPresence(h) / onTelemetry(h) shorthands for the common event names
+//   client.onLayer(h)                     layer.declare / layer.update
+//   client.channel(name)                  publish / onMessage / subscribe (channel.ts)
+//
+// Topics are remembered. On EVERY (re)connect the client re-sends one
+// `subscribe` with all of them before any onState("open") handler runs, and
+// stream callbacks (events, channel messages, layers) are held back while a
+// snapshot is outstanding, so a consumer always sees a fresh snapshot before any
+// event that follows it. Stream envelopes still held when a socket dies are
+// dropped: the next snapshot supersedes them. The raw on()/onMessage() handlers
+// are not gated; they see every frame the moment it arrives.
+//
+// Direct messages (lease.granted, lease.revoked, twist, signal) are not topic
+// streams; they arrive only for the robot or operator involved and are read
+// with client.on(type, handler).
+//
 // Reconnect policy: only transient failures retry — network drop, server
 // restart, handshake timeout, heartbeat lapse (`rate_limited`). Any other server
 // refusal is terminal and closes the client: `auth_failed` (bad/revoked token,
@@ -34,8 +55,20 @@
 // Browser-safe: uses the global WebSocket unless one is injected (Node 20 has no
 // global WebSocket; pass e.g. the `ws` package's constructor there).
 
-import type { AgentInfo, ClientKind, ErrorPayload, WelcomePayload } from "./generated/protocol.js";
+import type {
+  AgentInfo,
+  ClientKind,
+  ErrorPayload,
+  EventName,
+  HelpRequestPayload,
+  Lease,
+  LeaseRevokedPayload,
+  SnapshotPayload,
+  TelemetryPayload,
+  WelcomePayload,
+} from "./generated/protocol.js";
 import { PROTOCOL_VERSION, type AnyEnvelope, type Envelope, type MessagePayloads, type MessageType } from "./generated/messages.js";
+import { Channel, type ChannelMessage } from "./channel.js";
 import { MemoryTokenStore, type StoredCredentials, type TokenStore } from "./tokenStore.js";
 
 /** Minimal WebSocket surface the client uses (WHATWG WebSocket and `ws` both fit). */
@@ -125,6 +158,51 @@ export interface SendOptions {
 
 type Handler<E> = (env: E) => void;
 
+/**
+ * Subscribe topics: the well-known ones, or `channel:<name>` for a channel's
+ * broadcasts (see Channel.subscribe).
+ */
+export type Topic = "presence" | "events" | "telemetry" | "layers" | `channel:${string}`;
+
+/** The `data` each event name carries, as the server emits it. */
+export interface FleetEventData {
+  "robot.online": undefined;
+  "robot.offline": undefined;
+  /** The robot's telemetry payload, verbatim. */
+  "robot.telemetry": TelemetryPayload;
+  /** The robot's help.request payload, verbatim. */
+  "robot.help_requested": HelpRequestPayload;
+  "robot.lease_granted": Lease;
+  /** Handback: reason is "released". */
+  "robot.lease_released": LeaseRevokedPayload;
+  /** Expiry, steal, or operator loss. */
+  "robot.lease_revoked": LeaseRevokedPayload;
+}
+
+// Compile-time guard: FleetEventData covers exactly the protocol's event names.
+type Exactly<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
+const _eventNamesCovered: Exactly<keyof FleetEventData, EventName> = true;
+void _eventNamesCovered;
+
+/** One `event` envelope, narrowed by its name. */
+export type FleetEvent<N extends EventName = EventName> = {
+  [K in N]: {
+    event: K;
+    robot_id: string;
+    data: FleetEventData[K];
+    /** Server send time of the envelope, when present. */
+    ts_ms?: number;
+  };
+}[N];
+
+export type PresenceEvent = FleetEvent<"robot.online" | "robot.offline">;
+export type TelemetryEvent = FleetEvent<"robot.telemetry">;
+
+/** layer.declare / layer.update envelopes, as delivered to `layers` subscribers. */
+export type LayerEnvelope = Envelope<"layer.declare"> | Envelope<"layer.update">;
+
+type Waiter = { resolve: (s: SnapshotPayload) => void; reject: (e: Error) => void };
+
 export class FleetClient {
   readonly #opts: FleetClientOptions;
   readonly #store: TokenStore;
@@ -144,6 +222,21 @@ export class FleetClient {
   readonly #typed = new Map<string, Set<Handler<never>>>();
   readonly #any = new Set<Handler<AnyEnvelope>>();
   readonly #stateHandlers = new Set<Handler<StateChange>>();
+
+  // Snapshot-then-stream state.
+  readonly #topics = new Set<string>();
+  #subSeq = 0;
+  /** subscribe sends on the current socket still waiting for their snapshot, in send order. */
+  #inflight: { id: string; waiters: Waiter[]; added: string[] }[] = [];
+  /** subscribe() calls made while not open; the next (re)connect's snapshot answers them. */
+  #deferred: Waiter[] = [];
+  /** Stream envelopes held back while a snapshot is outstanding. */
+  #held: AnyEnvelope[] = [];
+  #snapshot: SnapshotPayload | undefined;
+  readonly #snapshotHandlers = new Set<Handler<SnapshotPayload>>();
+  readonly #eventHandlers = new Map<string, Set<Handler<FleetEvent>>>(); // "*" = every event
+  readonly #channelHandlers = new Map<string, Set<Handler<ChannelMessage>>>(); // "*" = every channel
+  readonly #layerHandlers = new Set<Handler<LayerEnvelope>>();
 
   constructor(opts: FleetClientOptions) {
     this.#opts = opts;
@@ -228,7 +321,161 @@ export class FleetClient {
     return () => this.#stateHandlers.delete(handler);
   }
 
+  // ------------------------------------------------ snapshot-then-stream API
+
+  /** Topics this client has subscribed to (re-sent on every reconnect). */
+  get topics(): readonly string[] {
+    return [...this.#topics];
+  }
+
+  /** The latest snapshot received, if any. */
+  get snapshot(): SnapshotPayload | undefined {
+    return this.#snapshot;
+  }
+
+  /**
+   * Subscribes to `topics` (additive) and resolves with the snapshot that
+   * answers it. The topics are remembered and re-subscribed on every reconnect,
+   * each time delivering a fresh snapshot to onSnapshot before further stream
+   * callbacks. Called while not open, it resolves with the next connection's
+   * snapshot. Rejects if the server refuses the subscribe or the client closes.
+   */
+  subscribe(topics: readonly Topic[]): Promise<SnapshotPayload> {
+    if (topics.length === 0) return Promise.reject(new TypeError("subscribe: topics must not be empty"));
+    if (this.#state === "closed") {
+      return Promise.reject(new FleetClientError("closed", "cannot subscribe: client is closed"));
+    }
+    const added = topics.filter((t) => !this.#topics.has(t));
+    for (const t of added) this.#topics.add(t);
+    return new Promise<SnapshotPayload>((resolve, reject) => {
+      const waiter: Waiter = { resolve, reject };
+      const ws = this.#ws;
+      if (this.#state === "open" && ws && ws.readyState === WS_OPEN) this.#sendSubscribe(ws, [...topics], [waiter], added);
+      else this.#deferred.push(waiter);
+    });
+  }
+
+  /** Every snapshot this client receives, including the one after each reconnect. */
+  onSnapshot(handler: Handler<SnapshotPayload>): () => void {
+    this.#snapshotHandlers.add(handler);
+    return () => this.#snapshotHandlers.delete(handler);
+  }
+
+  /** `event` envelopes: every one, or only those with the given name (data typed accordingly). */
+  onEvent(handler: Handler<FleetEvent>): () => void;
+  onEvent<N extends EventName>(name: N, handler: Handler<FleetEvent<N>>): () => void;
+  onEvent(a: EventName | Handler<FleetEvent>, b?: Handler<never>): () => void {
+    const key = typeof a === "string" ? a : "*";
+    const handler = (typeof a === "string" ? b : a) as Handler<FleetEvent>;
+    return addTo(this.#eventHandlers, key, handler);
+  }
+
+  /** robot.online / robot.offline (topic "presence"). */
+  onPresence(handler: Handler<PresenceEvent>): () => void {
+    const offOn = this.onEvent("robot.online", handler);
+    const offOff = this.onEvent("robot.offline", handler);
+    return () => {
+      offOn();
+      offOff();
+    };
+  }
+
+  /** robot.telemetry (topic "telemetry"); `data` is the robot's telemetry payload. */
+  onTelemetry(handler: Handler<TelemetryEvent>): () => void {
+    return this.onEvent("robot.telemetry", handler);
+  }
+
+  /** `channel.message` on one channel, or on every channel when `channel` is undefined. */
+  onChannelMessage(channel: string | undefined, handler: Handler<ChannelMessage>): () => void {
+    return addTo(this.#channelHandlers, channel ?? "*", handler);
+  }
+
+  /** layer.declare / layer.update (topic "layers"). */
+  onLayer(handler: Handler<LayerEnvelope>): () => void {
+    this.#layerHandlers.add(handler);
+    return () => this.#layerHandlers.delete(handler);
+  }
+
+  /** A typed view of one channel. Throws on an invalid channel name. */
+  channel<T = unknown>(name: string): Channel<T> {
+    return new Channel<T>(this, name);
+  }
+
   // ---------------------------------------------------------------- internals
+
+  #sendSubscribe(ws: WebSocketLike, topics: string[], waiters: Waiter[], added: string[] = []): void {
+    const id = `sub-${++this.#subSeq}`;
+    this.#inflight.push({ id, waiters, added });
+    ws.send(JSON.stringify(envelope("subscribe", { topics }, id)));
+  }
+
+  /** Stream half of inbound dispatch: snapshots, subscribe errors, gated events. */
+  #stream(env: AnyEnvelope): void {
+    switch (env.type) {
+      case "snapshot": {
+        const entry = this.#inflight.shift();
+        this.#snapshot = env.payload;
+        for (const h of [...this.#snapshotHandlers]) safeCall(h, env.payload);
+        for (const w of entry?.waiters ?? []) w.resolve(env.payload);
+        if (this.#inflight.length === 0) this.#flushHeld();
+        return;
+      }
+      case "error": {
+        const i = env.payload.ref === undefined ? -1 : this.#inflight.findIndex((e) => e.id === env.payload.ref);
+        if (i < 0) return;
+        const [entry] = this.#inflight.splice(i, 1);
+        // Refused: forget the topics this call introduced so reconnects do not re-send them.
+        for (const t of entry!.added) this.#topics.delete(t);
+        const err = new FleetClientError(env.payload.code, `subscribe: ${env.payload.message}`);
+        for (const w of entry!.waiters) w.reject(err);
+        if (this.#inflight.length === 0) this.#flushHeld();
+        return;
+      }
+      case "event":
+      case "channel.message":
+      case "layer.declare":
+      case "layer.update":
+        if (this.#inflight.length > 0) this.#held.push(env);
+        else this.#deliver(env);
+        return;
+      default:
+        return;
+    }
+  }
+
+  #flushHeld(): void {
+    const held = this.#held;
+    this.#held = [];
+    for (const env of held) this.#deliver(env);
+  }
+
+  #deliver(env: AnyEnvelope): void {
+    if (env.type === "event") {
+      const p = env.payload;
+      const ev = { event: p.event, robot_id: p.robot_id ?? "", data: p.data } as FleetEvent;
+      if (env.ts_ms !== undefined) ev.ts_ms = env.ts_ms;
+      for (const key of [p.event, "*"]) {
+        const set = this.#eventHandlers.get(key);
+        if (set) for (const h of [...set]) safeCall(h, ev);
+      }
+    } else if (env.type === "channel.message") {
+      const msg: ChannelMessage = { ...env.payload };
+      if (env.ts_ms !== undefined) msg.ts_ms = env.ts_ms;
+      for (const key of [msg.channel, "*"]) {
+        const set = this.#channelHandlers.get(key);
+        if (set) for (const h of [...set]) safeCall(h, msg);
+      }
+    } else if (env.type === "layer.declare" || env.type === "layer.update") {
+      for (const h of [...this.#layerHandlers]) safeCall(h, env);
+    }
+  }
+
+  /** The socket that carried the in-flight subscribes is gone: they wait for the next connection. */
+  #onSocketLost(): void {
+    for (const e of this.#inflight) this.#deferred.push(...e.waiters);
+    this.#inflight = [];
+    this.#held = [];
+  }
 
   async #attemptConnect(): Promise<void> {
     if (this.#closed()) return;
@@ -343,6 +590,7 @@ export class FleetClient {
         }
       }
       this.#dispatch(env);
+      if (this.#ws === ws) this.#stream(env);
     };
 
     ws.onerror = () => {
@@ -354,6 +602,7 @@ export class FleetClient {
       if (this.#ws !== ws) return; // superseded or closed by us
       this.#ws = undefined;
       this.#stopHeartbeat();
+      this.#onSocketLost();
       const err =
         lastError ??
         new FleetClientError("network", `socket closed (${ev?.code ?? "?"}${ev?.reason ? `: ${ev.reason}` : ""})`);
@@ -368,6 +617,13 @@ export class FleetClient {
     this.#heartbeat = setInterval(() => {
       if (ws.readyState === WS_OPEN) ws.send(JSON.stringify(envelope("heartbeat", {})));
     }, welcome.heartbeat_interval_ms);
+    // Re-subscribe before any onState("open") handler runs, so the fresh
+    // snapshot is the first stream delivery on this connection.
+    if (this.#topics.size > 0) {
+      const waiters = this.#deferred;
+      this.#deferred = [];
+      this.#sendSubscribe(ws, [...this.#topics], waiters);
+    }
     this.#setState({ state: "open", welcome });
     const first = this.#firstOpen;
     this.#firstOpen = undefined;
@@ -406,7 +662,11 @@ export class FleetClient {
         /* already closed */
       }
     }
+    this.#onSocketLost();
+    const pending = this.#deferred;
+    this.#deferred = [];
     this.#setState({ state: "closed", error: err });
+    for (const w of pending) w.reject(err);
     const first = this.#firstOpen;
     this.#firstOpen = undefined;
     first?.reject(err);
@@ -430,6 +690,13 @@ export class FleetClient {
 }
 
 // ------------------------------------------------------------------ helpers
+
+function addTo<K, H>(map: Map<K, Set<H>>, key: K, handler: H): () => void {
+  let set = map.get(key);
+  if (!set) map.set(key, (set = new Set()));
+  set.add(handler);
+  return () => set.delete(handler);
+}
 
 function envelope<T extends MessageType>(type: T, payload: MessagePayloads[T], id?: string): Envelope<T> {
   const env = { v: PROTOCOL_VERSION, type, ts_ms: Date.now(), payload } as Envelope<T>;
