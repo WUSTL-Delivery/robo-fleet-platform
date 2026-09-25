@@ -65,9 +65,11 @@ func (c *Conn) Send(env protocol.Envelope) bool {
 }
 
 // Close tears the connection down; the read loop returns and the handler's
-// OnDisconnect runs.
+// OnDisconnect runs. It does not wait for the peer's close handshake: the
+// callers drop peers that have lapsed or been superseded, and a frozen peer
+// would otherwise hold off robot.offline for the handshake timeout (5 s).
 func (c *Conn) Close() {
-	c.ws.Close(websocket.StatusNormalClosure, "server closed connection")
+	c.ws.CloseNow()
 }
 
 type Gateway struct {

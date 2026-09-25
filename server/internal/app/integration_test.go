@@ -478,3 +478,54 @@ func TestIntegrationOperatorInviteRejected(t *testing.T) {
 }
 
 func f(v float64) *float64 { return &v }
+
+// A robot that stops heartbeating but keeps its socket open (frozen process,
+// dead Wi-Fi with no FIN) must go offline within about 2.5 heartbeat intervals,
+// not after an extra wait for a close handshake the peer will never answer.
+func TestIntegrationHeartbeatLapseGoesOfflinePromptly(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.HeartbeatInterval = 200 * time.Millisecond
+	h := newHarness(t, cfg)
+
+	svcToken, _, err := h.store.CreateToken(h.fleet.ID, store.KindService, "watcher")
+	if err != nil {
+		t.Fatal(err)
+	}
+	robotToken, _, err := h.store.CreateToken(h.fleet.ID, store.KindRobot, "frozen-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	service := h.connect(svcToken)
+	service.send(protocol.TypeSubscribe, protocol.Subscribe{Topics: []string{"presence"}})
+	service.expect(protocol.TypeSnapshot)
+
+	// Hello, then never heartbeat and never read again.
+	_ = h.connect(robotToken)
+	service.expectEvent(protocol.EventRobotOnline)
+	start := time.Now()
+
+	// The service heartbeats so only the robot lapses.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		tk := time.NewTicker(cfg.HeartbeatInterval / 2)
+		defer tk.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tk.C:
+				data, _ := json.Marshal(protocol.Msg(protocol.TypeHeartbeat, struct{}{}))
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				_ = service.ws.Write(ctx, websocket.MessageText, data)
+				cancel()
+			}
+		}
+	}()
+
+	service.expectEvent(protocol.EventRobotOffline)
+	if elapsed, limit := time.Since(start), cfg.HeartbeatInterval*5/2+time.Second; elapsed > limit {
+		t.Fatalf("robot.offline after %v, want within %v", elapsed, limit)
+	}
+}
