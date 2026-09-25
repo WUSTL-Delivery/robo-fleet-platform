@@ -59,7 +59,7 @@ docker run --rm -v fleet-data:/var/lib/fleet ghcr.io/<owner>/fleet-server:0.1.0 
 docker run --rm -e FLEET_DB=/tmp/x.db ghcr.io/<owner>/fleet-server:0.1.0 -bootstrap my-fleet
 
 # Local build without CI
-docker build -t fleet-server:dev --build-arg VERSION=dev server/
+docker build -f server/Dockerfile -t fleet-server:dev --build-arg VERSION=dev .
 ```
 
 Configuration in the container is by environment variable (`FLEET_LISTEN`, `FLEET_DB`,

@@ -560,7 +560,7 @@ volumes:
 ```
 
 Set `FLEET_SERVER_IMAGE=fleet-server:dev` in `.env` to run a locally built image instead
-of the pin (`docker build -t fleet-server:dev server/`).
+of the pin (`docker build -f server/Dockerfile -t fleet-server:dev .` from the repo root).
 
 Caddy: add a host for the fleet and terminate TLS there. The server speaks plain
 WebSocket; robots and services dial `wss://fleet.<domain>/ws`.

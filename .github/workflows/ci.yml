@@ -78,13 +78,42 @@ jobs:
 
       - run: npm run typecheck
 
+      # The client tests' globalSetup builds and runs a real fleet-server.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
       - run: npm test
 
       - run: npm run build
 
+  console:
+    name: Console
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            sdk/typescript/package-lock.json
+            console/package-lock.json
+
+      # The console depends on the SDK via "file:../sdk/typescript" (built dist/).
+      - name: build SDK
+        working-directory: sdk/typescript
+        run: npm ci && npm run build
+
+      - name: build console
+        working-directory: console
+        run: npm ci && npm run build
+
   image:
     name: Build and publish image
-    needs: test
+    needs: [test, console]
     # Default branch and version tags only; never for pull requests (a fork's
     # PR has no packages:write token anyway).
     if: >-
@@ -131,7 +160,9 @@ jobs:
 
       - uses: docker/build-push-action@v6
         with:
-          context: server
+          # Repo root: the image also builds console/ and sdk/typescript/.
+          context: .
+          file: server/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
