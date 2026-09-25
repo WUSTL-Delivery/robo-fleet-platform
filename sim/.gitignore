@@ -1,0 +1,3 @@
+node_modules/
+# per-robot credentials written by `npm run sim` (FileTokenStore)
+.sim-state/

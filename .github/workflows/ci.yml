@@ -88,6 +88,35 @@ jobs:
 
       - run: npm run build
 
+  sim:
+    name: Sim fleet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            sdk/typescript/package-lock.json
+            sim/package-lock.json
+
+      # The sim depends on the SDK via "file:../sdk/typescript" (built dist/).
+      - name: build SDK
+        working-directory: sdk/typescript
+        run: npm ci && npm run build
+
+      # The integration tests' globalSetup builds and runs a real fleet-server.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: typecheck and test
+        working-directory: sim
+        run: npm ci && npm run typecheck && npm test
+
   console:
     name: Console
     runs-on: ubuntu-latest
