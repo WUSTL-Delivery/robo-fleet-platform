@@ -56,6 +56,8 @@ db: "fleet.db"
 heartbeat_interval_ms: 10000   # clients heartbeat at this rate; ~2.5 missed => offline
 lease_ttl_ms: 15000            # teleop lease expires this long after grant/renew
 sweep_ms: 1000                 # how often lapsed heartbeats / expired leases are swept
+client_msgs_per_sec: 50        # per connection, telemetry and channel.publish each
+client_msgs_burst: 100         # back-to-back allowance before throttling starts
 EOF
 
 # First run: create a fleet and print an enrollment key (shown once, stored hashed).
@@ -246,6 +248,13 @@ service should still re-declare and re-send when it (re)connects.
 `not_found`, `not_authorized`, `conflict`, `rate_limited`. `ref` is the `id` of the
 message that caused it when there was one. Errors do not close the socket except during
 the handshake and on heartbeat lapse.
+
+`telemetry` and `channel.publish` are rate limited per connection, each type with its own
+token bucket (`client_msgs_per_sec`, `client_msgs_burst`; defaults 50/s and 100). Over the
+limit, the server drops the message and replies `error{code: rate_limited, ref}` naming
+it, at most once per second however many it drops; the socket stays open. Nothing else
+(heartbeats, leases, subscribe, signaling) is throttled. Treat the notice as "send less
+often": telemetry is latest-wins, so there is nothing to resend.
 
 ---
 
@@ -599,7 +608,7 @@ Read this before designing against the server. Each item is a known gap, not a h
 | **The console is basic.** It shows robots live on a map, renders what each manifest declares, and does take over / WASD / hand back. It does not render declared map layers yet, and a plain `go build` does not include it (`npm run embed` in `console/`, or the Docker image) | a service's layers have nowhere to show yet; build the image or embed the console before pointing an operator at `/` | layer rendering with the layer-streams work |
 | **Layer retention is in memory only** | the server replays each layer's latest declare and update to late `layers` subscribers, but a server restart forgets them, and a service's layers are dropped 5 minutes after it disconnects, so re-declare and re-send on every (re)connect | persisting layers in the store, if a deployment needs it |
 | **Enrollment keys never expire and are reusable** | treat the key as a long-lived secret; adding a new one is a config change, revoking the old one is a DB edit | admin surface, later |
-| **No rate limiting beyond the 64 KB payload cap and the 64-deep send queue** | a chatty telemetry loop will be disconnected for overflow before it is throttled | fan-out work |
+| **Rate limits are per connection and per type, not per subscriber** | a chatty `telemetry` or `channel.publish` loop is throttled (§2.8), not disconnected; a slow *reader* still overflows its 64-deep send queue and is dropped | per-subscriber fan-out limits, later |
 | **Twist rides the bus as a fallback**; no WebRTC media, no TURN | fine for sim and for testing the club node's lease handling; not for driving a real robot | roadmap step 3 |
 | **No replay / black-box recording** | | later milestone |
 | **Snapshot lists robots only** | you cannot discover other services or operators from a snapshot | if a real need appears |

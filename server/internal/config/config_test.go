@@ -91,3 +91,20 @@ func TestAdminTokenFromEnvAndLength(t *testing.T) {
 		t.Fatalf("admin token not applied: %+v", cfg)
 	}
 }
+
+func TestClientRateLimitKeys(t *testing.T) {
+	cfg := Default()
+	if cfg.ClientMsgsPerSec <= 0 || cfg.ClientMsgsBurst <= 0 {
+		t.Fatalf("rate limit defaults must be on: %+v", cfg)
+	}
+	if err := cfg.applyEnv(lookupFrom(map[string]string{EnvClientMsgsPerSec: "7", EnvClientMsgsBurst: "9"})); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ClientMsgsPerSec != 7 || cfg.ClientMsgsBurst != 9 {
+		t.Fatalf("env not applied: per_sec=%d burst=%d", cfg.ClientMsgsPerSec, cfg.ClientMsgsBurst)
+	}
+	cfg.ClientMsgsBurst = 0
+	if _, err := cfg.validate(); err == nil {
+		t.Fatal("expected error for client_msgs_burst = 0")
+	}
+}

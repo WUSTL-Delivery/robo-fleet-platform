@@ -22,6 +22,12 @@ type Config struct {
 	LeaseTTLMs          int    `yaml:"lease_ttl_ms"`
 	SweepMs             int    `yaml:"sweep_ms"`
 
+	// Per-connection inbound limits on the chatty message types (telemetry,
+	// channel.publish), each metered separately (DESIGN.md D2). Over-limit
+	// messages are dropped with a rate_limited notice; the socket stays open.
+	ClientMsgsPerSec int `yaml:"client_msgs_per_sec"`
+	ClientMsgsBurst  int `yaml:"client_msgs_burst"`
+
 	// Optional declarative bootstrap: on startup, ensure this fleet exists and
 	// that this enrollment key is registered for it. Lets an operator choose the
 	// key up front (e.g. a CI secret shared with the clients that will enroll)
@@ -47,6 +53,8 @@ func Default() Config {
 		HeartbeatIntervalMs: 10000,
 		LeaseTTLMs:          15000,
 		SweepMs:             1000,
+		ClientMsgsPerSec:    50,
+		ClientMsgsBurst:     100,
 	}
 }
 
@@ -76,6 +84,8 @@ const (
 	EnvHeartbeatIntervalMs = "FLEET_HEARTBEAT_INTERVAL_MS"
 	EnvLeaseTTLMs          = "FLEET_LEASE_TTL_MS"
 	EnvSweepMs             = "FLEET_SWEEP_MS"
+	EnvClientMsgsPerSec    = "FLEET_CLIENT_MSGS_PER_SEC"
+	EnvClientMsgsBurst     = "FLEET_CLIENT_MSGS_BURST"
 	EnvBootstrapFleet      = "FLEET_BOOTSTRAP_FLEET"
 	EnvBootstrapEnrollKey  = "FLEET_BOOTSTRAP_ENROLL_KEY"
 	EnvAdminToken          = "FLEET_ADMIN_TOKEN"
@@ -104,6 +114,8 @@ func (c *Config) applyEnv(lookup func(string) (string, bool)) error {
 		{EnvHeartbeatIntervalMs, &c.HeartbeatIntervalMs},
 		{EnvLeaseTTLMs, &c.LeaseTTLMs},
 		{EnvSweepMs, &c.SweepMs},
+		{EnvClientMsgsPerSec, &c.ClientMsgsPerSec},
+		{EnvClientMsgsBurst, &c.ClientMsgsBurst},
 	} {
 		v, ok := lookup(e.name)
 		if !ok {
@@ -130,6 +142,10 @@ func (c Config) validate() (Config, error) {
 		return c, fmt.Errorf("config: lease_ttl_ms must be > 0")
 	case c.SweepMs <= 0:
 		return c, fmt.Errorf("config: sweep_ms must be > 0")
+	case c.ClientMsgsPerSec <= 0:
+		return c, fmt.Errorf("config: client_msgs_per_sec must be > 0")
+	case c.ClientMsgsBurst <= 0:
+		return c, fmt.Errorf("config: client_msgs_burst must be > 0")
 	case (c.BootstrapFleet == "") != (c.BootstrapEnrollKey == ""):
 		return c, fmt.Errorf("config: bootstrap_fleet and bootstrap_enroll_key must be set together")
 	case c.BootstrapEnrollKey != "" && len(c.BootstrapEnrollKey) < MinEnrollKeyLen:
