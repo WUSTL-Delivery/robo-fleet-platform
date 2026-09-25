@@ -14,7 +14,9 @@ Every language that speaks the protocol validates **the same fixtures**:
 - Go server: `cd server && go test ./internal/protocol/` — validates all fixtures against
   the schemas, and round-trips them through the Go structs (unmarshal → marshal → still
   schema-valid). This is what stops the Go types drifting from the schemas.
-- TS SDK (when it lands): same fixtures via ajv in vitest.
+- TS SDK: `cd sdk/typescript && npm test` — `test/contract.test.ts` validates the same
+  fixtures via ajv (draft 2020-12) against the same schemas and `catalog.json`, and checks
+  the generated `MESSAGE_TYPES` match the catalog.
 - Python SDK: same fixtures via jsonschema in pytest.
 
 A protocol change is: edit schema → add/adjust fixtures → watch every language's contract
