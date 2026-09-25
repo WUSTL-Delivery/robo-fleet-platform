@@ -28,6 +28,29 @@ type Client struct {
 	Name    string
 }
 
+// EnrollKey is an enrollment key's metadata; the plaintext is never stored.
+// A zero ExpiresAt means the key never expires (every key minted before
+// expiry existed, and the FLEET_BOOTSTRAP_ENROLL_KEY key). A non-zero
+// RevokedAt means the key is revoked.
+type EnrollKey struct {
+	ID        string
+	FleetID   string
+	CreatedAt time.Time
+	ExpiresAt time.Time
+	RevokedAt time.Time
+}
+
+// Revoked reports whether the key has been revoked.
+func (k EnrollKey) Revoked() bool { return !k.RevokedAt.IsZero() }
+
+// Expired reports whether the key has an expiry that is at or before now.
+func (k EnrollKey) Expired(now time.Time) bool {
+	return !k.ExpiresAt.IsZero() && !now.Before(k.ExpiresAt)
+}
+
+// ErrEnrollKeyNotFound: no enrollment key with that id in that fleet.
+var ErrEnrollKeyNotFound = errors.New("store: enrollment key not found")
+
 // Operator invite redemption failures. Callers map all three to one generic
 // auth error on the wire; the distinction is for logs and admin tooling.
 var (
@@ -40,15 +63,31 @@ type Store interface {
 	CreateFleet(name string) (Fleet, error)
 	FleetByName(name string) (Fleet, bool, error)
 
-	// CreateEnrollKey mints a fleet enrollment key; the plaintext is returned
-	// exactly once and only its hash is stored.
+	// CreateEnrollKey mints a fleet enrollment key that never expires; the
+	// plaintext is returned exactly once and only its hash is stored.
 	CreateEnrollKey(fleetID string) (string, error)
-	// AuthEnroll resolves an enrollment key to its fleet.
+	// MintEnrollKey mints a fleet enrollment key valid for ttl, or forever
+	// when ttl is 0 (negative is an error). The plaintext is returned exactly
+	// once and only its hash is stored.
+	MintEnrollKey(fleetID string, ttl time.Duration) (key string, k EnrollKey, err error)
+	// AuthEnroll resolves an enrollment key to its fleet. Revoked and expired
+	// keys do not authenticate. Tokens already minted through a key are not
+	// affected by that key's revocation or expiry.
 	AuthEnroll(key string) (fleetID string, ok bool, err error)
-	// SeedEnrollKey registers a caller-chosen enrollment key (stored hashed).
-	// Idempotent: seeding a key that already exists is a no-op, and a revoked
-	// key stays revoked.
+	// LookupEnrollKey returns a key's metadata whatever its state (revoked,
+	// expired, or valid), for callers that must tell those apart.
+	LookupEnrollKey(key string) (EnrollKey, bool, error)
+	// SeedEnrollKey registers a caller-chosen enrollment key (stored hashed)
+	// that never expires. Idempotent: seeding a key that already exists is a
+	// no-op, and a revoked key stays revoked.
 	SeedEnrollKey(fleetID, key string) error
+	// ListEnrollKeys returns every enrollment key of a fleet, revoked and
+	// expired ones included, oldest first.
+	ListEnrollKeys(fleetID string) ([]EnrollKey, error)
+	// RevokeEnrollKey revokes the key with that id in that fleet so it can no
+	// longer enroll new clients. Idempotent: revoking a revoked key returns it
+	// unchanged. An id not in the fleet returns ErrEnrollKeyNotFound.
+	RevokeEnrollKey(fleetID, id string) (EnrollKey, error)
 
 	// CreateToken mints an opaque per-client token (returned once, stored hashed).
 	CreateToken(fleetID string, kind Kind, name string) (string, Client, error)

@@ -6,6 +6,16 @@
 //	POST /api/admin/fleets/{fleet}/operator-invites   {"ttl": "24h"} (body optional)
 //	  -> 200 {"key": "fp-oi-...", "fleet_id": "f_...", "expires_at": "RFC3339"}
 //
+//	POST /api/admin/fleets/{fleet}/enroll-keys                {"ttl": "720h"} (body optional; no ttl = never expires)
+//	  -> 200 {"key": "fp-ek-...", "id": "ek_...", "fleet_id": "f_...", "created_at": ..., "expires_at"?: ..., "state": "active"}
+//	GET  /api/admin/fleets/{fleet}/enroll-keys
+//	  -> 200 {"enroll_keys": [{"id", "fleet_id", "created_at", "expires_at"?, "revoked_at"?, "state"}]}
+//	POST /api/admin/fleets/{fleet}/enroll-keys/{id}/revoke
+//	  -> 200 the revoked key's record (idempotent); 404 if the id is not in that fleet
+//
+// Revoking an enrollment key stops new enrollments with it; clients already
+// enrolled through it keep their tokens.
+//
 // {fleet} is the fleet's name, the same name used by -bootstrap and
 // FLEET_BOOTSTRAP_FLEET.
 package admin
@@ -58,6 +68,15 @@ func Handler(st store.Store, token string) http.Handler {
 	mux.HandleFunc("POST /api/admin/fleets/{fleet}/operator-invites", func(w http.ResponseWriter, r *http.Request) {
 		mintOperatorInvite(st, w, r)
 	})
+	mux.HandleFunc("POST /api/admin/fleets/{fleet}/enroll-keys", func(w http.ResponseWriter, r *http.Request) {
+		mintEnrollKey(st, w, r)
+	})
+	mux.HandleFunc("GET /api/admin/fleets/{fleet}/enroll-keys", func(w http.ResponseWriter, r *http.Request) {
+		listEnrollKeys(st, w, r)
+	})
+	mux.HandleFunc("POST /api/admin/fleets/{fleet}/enroll-keys/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
+		revokeEnrollKey(st, w, r)
+	})
 	return requireToken(token, mux)
 }
 
@@ -90,14 +109,8 @@ func mintOperatorInvite(st store.Store, w http.ResponseWriter, r *http.Request) 
 		ttl = d
 	}
 
-	fleet, ok, err := st.FleetByName(r.PathValue("fleet"))
-	if err != nil {
-		slog.Error("admin: fleet lookup failed", "err", err)
-		writeJSON(w, http.StatusInternalServerError, errorBody{Error: "internal error"})
-		return
-	}
+	fleet, ok := fleetFromPath(st, w, r)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, errorBody{Error: "no such fleet"})
 		return
 	}
 
@@ -110,6 +123,22 @@ func mintOperatorInvite(st store.Store, w http.ResponseWriter, r *http.Request) 
 	slog.Info("admin: minted operator invite", "fleet", fleet.Name, "expires_at", expiresAt)
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, InviteResponse{Key: key, FleetID: fleet.ID, ExpiresAt: expiresAt.UTC()})
+}
+
+// fleetFromPath resolves the {fleet} path segment, writing the 404 or 500
+// itself when it returns false.
+func fleetFromPath(st store.Store, w http.ResponseWriter, r *http.Request) (store.Fleet, bool) {
+	fleet, ok, err := st.FleetByName(r.PathValue("fleet"))
+	if err != nil {
+		slog.Error("admin: fleet lookup failed", "err", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody{Error: "internal error"})
+		return store.Fleet{}, false
+	}
+	if !ok {
+		writeJSON(w, http.StatusNotFound, errorBody{Error: "no such fleet"})
+		return store.Fleet{}, false
+	}
+	return fleet, true
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
