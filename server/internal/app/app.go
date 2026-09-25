@@ -13,6 +13,7 @@ import (
 
 	"fleetplatform/server/internal/bus"
 	"fleetplatform/server/internal/gateway"
+	"fleetplatform/server/internal/layers"
 	"fleetplatform/server/internal/ops"
 	"fleetplatform/server/internal/protocol"
 	"fleetplatform/server/internal/registry"
@@ -24,7 +25,13 @@ type Config struct {
 	HeartbeatInterval time.Duration
 	LeaseTTL          time.Duration
 	SweepEvery        time.Duration
+	// LayerTTL is how long a service's retained layers outlive its connection.
+	// Zero means DefaultLayerTTL.
+	LayerTTL time.Duration
 }
+
+// DefaultLayerTTL keeps a service's layers across a restart or a Wi-Fi blip.
+const DefaultLayerTTL = 5 * time.Minute
 
 type App struct {
 	cfg Config
@@ -32,6 +39,11 @@ type App struct {
 	reg *registry.Registry
 	ops *ops.Ops
 	bus *bus.Bus
+	lay *layers.Store
+
+	// layerMu orders layer fan-out against late-subscriber replay, so a live
+	// update can never be followed by an older retained copy.
+	layerMu sync.Mutex
 
 	mu    sync.Mutex
 	conns map[string]*gateway.Conn // clientID → live conn
@@ -44,6 +56,7 @@ func New(cfg Config, st store.Store) *App {
 		reg:   registry.New(),
 		ops:   ops.New(time.Now, cfg.LeaseTTL),
 		bus:   bus.New(),
+		lay:   layers.New(),
 		conns: make(map[string]*gateway.Conn),
 	}
 }
@@ -80,6 +93,11 @@ func (a *App) Run(ctx context.Context) {
 			for _, rv := range a.ops.SweepExpired() {
 				a.notifyRevoked(rv)
 			}
+			ttl := a.cfg.LayerTTL
+			if ttl <= 0 {
+				ttl = DefaultLayerTTL
+			}
+			a.lay.Sweep(now, ttl)
 		}
 	}
 }
@@ -145,6 +163,9 @@ func (a *App) OnConnect(c *gateway.Conn) {
 		a.dropConn(prev) // one live conn per identity; newest wins
 	}
 	a.reg.Up(c.Client, time.Now())
+	if c.Client.Kind == store.KindService {
+		a.lay.OwnerUp(c.Client.ID)
+	}
 	if c.Client.Kind == store.KindRobot {
 		a.emit(c.Client.FleetID, bus.TopicPresence, protocol.Event{Event: protocol.EventRobotOnline, RobotID: c.Client.ID})
 	}
@@ -165,6 +186,8 @@ func (a *App) OnDisconnect(c *gateway.Conn) {
 	switch c.Client.Kind {
 	case store.KindRobot:
 		a.emit(c.Client.FleetID, bus.TopicPresence, protocol.Event{Event: protocol.EventRobotOffline, RobotID: c.Client.ID})
+	case store.KindService:
+		a.lay.OwnerDown(c.Client.ID, time.Now())
 	case store.KindOperator:
 		// Operator loss is the server's transition, never the robot's (§7.5).
 		for _, rv := range a.ops.DropOperator(c.Client.ID) {
@@ -216,8 +239,7 @@ func (a *App) OnMessage(c *gateway.Conn, env protocol.Envelope) {
 		if !parse(c, env, &sub) {
 			return
 		}
-		a.bus.Subscribe(c.Client.ID, sub.Topics)
-		c.Send(protocol.Msg(protocol.TypeSnapshot, a.snapshot(c.Client.FleetID)))
+		a.subscribe(c, sub.Topics)
 
 	case protocol.TypeLeaseClaim:
 		if !require(c, env, kind == store.KindOperator) {
@@ -310,13 +332,56 @@ func (a *App) OnMessage(c *gateway.Conn, env protocol.Envelope) {
 		if !require(c, env, kind == store.KindService) {
 			return
 		}
-		// v0: layers fan out live to subscribers; retained layer state comes with
-		// the console milestone.
-		a.fanout(c.Client.FleetID, bus.TopicLayers, env)
+		a.handleLayer(c, env)
 
 	default:
 		c.Send(errMsg(protocol.ErrInvalidMessage, "unknown message type "+env.Type, env.ID))
 	}
+}
+
+// subscribe is snapshot-then-stream; a `layers` subscriber also gets every
+// retained layer (declare, then latest update) right after the snapshot.
+func (a *App) subscribe(c *gateway.Conn, topics []string) {
+	wantsLayers := false
+	for _, t := range topics {
+		if t == bus.TopicLayers {
+			wantsLayers = true
+		}
+	}
+	if wantsLayers {
+		a.layerMu.Lock()
+		defer a.layerMu.Unlock()
+	}
+	a.bus.Subscribe(c.Client.ID, topics)
+	c.Send(protocol.Msg(protocol.TypeSnapshot, a.snapshot(c.Client.FleetID)))
+	if wantsLayers {
+		for _, env := range a.lay.Replay(c.Client.FleetID) {
+			c.Send(env)
+		}
+	}
+}
+
+// handleLayer retains a layer message and fans it out live. The payload stays
+// opaque beyond its layer_id (D4).
+func (a *App) handleLayer(c *gateway.Conn, env protocol.Envelope) {
+	var ref struct {
+		LayerID string `json:"layer_id"`
+	}
+	if !parse(c, env, &ref) {
+		return
+	}
+	if ref.LayerID == "" {
+		c.Send(errMsg(protocol.ErrInvalidMessage, env.Type+" needs layer_id", env.ID))
+		return
+	}
+	a.layerMu.Lock()
+	defer a.layerMu.Unlock()
+	if env.Type == protocol.TypeLayerDeclare {
+		a.lay.Declare(c.Client.FleetID, c.Client.ID, ref.LayerID, env)
+	} else {
+		a.lay.Update(c.Client.FleetID, c.Client.ID, ref.LayerID, env)
+	}
+	a.fanout(c.Client.FleetID, bus.TopicLayers, env)
 }
 
 func (a *App) handleClaim(c *gateway.Conn, env protocol.Envelope, claim protocol.LeaseClaim) {

@@ -187,7 +187,7 @@ Topics:
 | `presence` | `event{robot.online}`, `event{robot.offline}` |
 | `events` | `event{robot.help_requested}`, `robot.lease_granted`, `robot.lease_released`, `robot.lease_revoked` |
 | `telemetry` | `event{robot.telemetry, robot_id, data: <the telemetry payload>}` for every robot in the fleet |
-| `layers` | every `layer.declare` / `layer.update` from services in the fleet |
+| `layers` | every `layer.declare` / `layer.update` from services in the fleet; the retained ones are replayed right after the snapshot (2.7) |
 | `channel:<name>` | `channel.message` for broadcasts on that channel |
 
 The immediate reply is one `snapshot` listing every robot the fleet has ever enrolled,
@@ -232,8 +232,13 @@ generically according to `style`; there is no layer-specific code in the platfor
   "payload": { "layer_id": "campus-graph", "data": { "type": "FeatureCollection", "features": [] } } }
 ```
 
-In v0 layers fan out live to `layers` subscribers only; the server does not retain the
-last update, so re-declare and re-send on reconnect (§8).
+The server keeps the latest `layer.declare` and the latest `layer.update` for each layer
+id in the fleet. A client that subscribes to `layers` gets its `snapshot`, then every
+retained layer (declare, then latest update, ordered by `layer_id`), then the live stream,
+so a console that opens late sees the map without the service re-sending. Retained layers
+survive the service disconnecting for up to 5 minutes (a restart or a Wi-Fi blip); after
+that they are dropped. Retention is in memory: a server restart forgets them, so a
+service should still re-declare and re-send when it (re)connects.
 
 ### 2.8 Errors
 
@@ -592,7 +597,7 @@ Read this before designing against the server. Each item is a known gap, not a h
 | **SDKs are source-only, and there is no ROS 2 node yet.** `sdk/typescript` and `sdk/python` exist (§5), but neither is published to npm or PyPI, and `fleet_agent` (`sdk/ros2`) is not written | install from a checkout (`pip install -e sdk/python`); a ROS robot wires the Python SDK's `on_twist` / `on_lease` / `telemetry` to its topics by hand until `fleet_agent` does it | package publishing with the project rename; `fleet_agent` in the real-hardware phase |
 | **Operator access is invite-only, from the CLI.** Operators redeem a single-use, expiring invite minted by `fleetctl invite operator` (D14), which needs the server's `FLEET_ADMIN_TOKEN`. There are no passwords, no roles, and no way to mint an invite from the console | whoever holds the admin token onboards every operator; an operator's token lives in their browser, and losing it means a new invite | console-side invites through the same admin API, later |
 | **The console is basic.** It shows robots live on a map, renders what each manifest declares, and does take over / WASD / hand back. It does not render declared map layers yet, and a plain `go build` does not include it (`npm run embed` in `console/`, or the Docker image) | a service's layers have nowhere to show yet; build the image or embed the console before pointing an operator at `/` | layer rendering with the layer-streams work |
-| **Layers are not retained** | a service must re-declare and re-send after it reconnects, and a console that connects later sees nothing until the next update | console milestone |
+| **Layer retention is in memory only** | the server replays each layer's latest declare and update to late `layers` subscribers, but a server restart forgets them, and a service's layers are dropped 5 minutes after it disconnects, so re-declare and re-send on every (re)connect | persisting layers in the store, if a deployment needs it |
 | **Enrollment keys never expire and are reusable** | treat the key as a long-lived secret; adding a new one is a config change, revoking the old one is a DB edit | admin surface, later |
 | **No rate limiting beyond the 64 KB payload cap and the 64-deep send queue** | a chatty telemetry loop will be disconnected for overflow before it is throttled | fan-out work |
 | **Twist rides the bus as a fallback**; no WebRTC media, no TURN | fine for sim and for testing the club node's lease handling; not for driving a real robot | roadmap step 3 |
