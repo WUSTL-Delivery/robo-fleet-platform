@@ -21,5 +21,7 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    // MapLibre alone is ~1 MB minified; the console is one embedded bundle.
+    chunkSizeWarningLimit: 1600,
   },
 });

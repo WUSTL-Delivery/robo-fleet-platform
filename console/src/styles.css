@@ -94,7 +94,89 @@ input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .dot.connecting { background: var(--warn); }
 .dot.error { background: var(--danger); }
 
-main.shell { padding: 24px 20px; max-width: 880px; }
 dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 8px 18px; margin: 0; font-size: 14px; }
 dl.facts dt { color: var(--muted); }
 dl.facts dd { margin: 0; }
+
+.dot.offline { background: transparent; border: 1.5px solid var(--muted); }
+.secondary.small { padding: 4px 9px; font-size: 12px; }
+.hint.pad { padding: 0 16px; }
+
+/* Signed-in layout: topbar over list | map | detail. */
+.app { height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+.who { font-size: 13px; color: var(--muted); }
+.workspace { display: grid; grid-template-columns: 280px 1fr 300px; min-height: 0; }
+
+.fleet-list, .robot-panel { background: var(--panel); overflow-y: auto; min-height: 0; }
+.fleet-list { border-right: 1px solid var(--border); }
+.robot-panel { border-left: 1px solid var(--border); padding: 16px; }
+.fleet-list header, .robot-panel header {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.fleet-list header { padding: 14px 16px 10px; }
+.robot-panel header { margin-bottom: 14px; }
+.fleet-list h2, .robot-panel h2 { font-size: 14px; margin: 0; }
+.fleet-list .count { font-size: 12px; color: var(--muted); }
+.fleet-list ul { list-style: none; margin: 0; padding: 0 8px 12px; }
+
+.robot-row {
+  width: 100%; display: grid; grid-template-columns: auto 1fr auto; grid-template-rows: auto auto;
+  column-gap: 10px; align-items: center; text-align: left;
+  padding: 8px 10px; border-radius: 8px; border: 1px solid transparent;
+  background: none; color: var(--text); font: inherit; cursor: pointer;
+}
+.robot-row:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+.robot-row[aria-pressed="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.robot-row .dot { grid-row: 1 / span 2; }
+.robot-row .name { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.robot-row .presence { grid-column: 2; font-size: 12px; color: var(--muted); }
+.robot-row .badge { grid-column: 3; grid-row: 1 / span 2; }
+.robot-row[data-presence="offline"] .name { color: var(--muted); }
+
+.badge {
+  font-size: 11px; padding: 2px 7px; border-radius: 999px; white-space: nowrap;
+  border: 1px solid var(--border); color: var(--muted);
+}
+.badge.state-help_requested { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 60%, transparent); }
+.badge.state-teleop { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+
+.robot-panel.empty { display: grid; place-items: center; text-align: center; }
+
+.map-wrap { position: relative; min-width: 0; min-height: 0; }
+.map { position: absolute; inset: 0; }
+.map-overlay {
+  position: absolute; left: 12px; bottom: 12px; display: flex; gap: 8px; align-items: center;
+  font-size: 12px; pointer-events: none;
+}
+.map-overlay > * { pointer-events: auto; }
+.map-overlay span, .map-overlay button {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; color: var(--text);
+}
+
+.robot-marker { display: grid; justify-items: center; cursor: pointer; }
+.robot-marker .arrow {
+  width: 22px; height: 22px; border-radius: 50%; background: #1e88e5; border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 40%); position: relative;
+}
+/* Heading tick: points "up" before rotation, i.e. north on the map. */
+.robot-marker .arrow::after {
+  content: ""; position: absolute; left: 50%; top: -9px; transform: translateX(-50%);
+  border: 5px solid transparent; border-bottom: 7px solid #1e88e5;
+}
+.robot-marker .arrow.no-heading::after { display: none; }
+.robot-marker[data-state="HELP_REQUESTED"] .arrow { background: #f5a623; }
+.robot-marker[data-state="HELP_REQUESTED"] .arrow::after { border-bottom-color: #f5a623; }
+.robot-marker[data-state="TELEOP"] .arrow { background: #13a36b; }
+.robot-marker[data-state="TELEOP"] .arrow::after { border-bottom-color: #13a36b; }
+.robot-marker.selected .arrow { outline: 3px solid #fff; outline-offset: 2px; }
+.robot-marker .label {
+  margin-top: 4px; font-size: 11px; padding: 1px 6px; border-radius: 6px; white-space: nowrap;
+  background: rgb(15 23 32 / 80%); color: #fff;
+}
+
+@media (max-width: 900px) {
+  .app { height: auto; min-height: 100vh; }
+  .workspace { grid-template-columns: 1fr; grid-template-rows: auto 60vh auto; }
+  .fleet-list { border-right: none; border-bottom: 1px solid var(--border); max-height: 40vh; }
+  .robot-panel { border-left: none; border-top: 1px solid var(--border); }
+}

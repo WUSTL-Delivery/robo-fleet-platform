@@ -13,6 +13,7 @@ export interface SessionView {
 
 export function App() {
   const clientRef = useRef<FleetClient | null>(null);
+  const [client, setClient] = useState<FleetClient | null>(null);
   const [session, setSession] = useState<SessionView | null>(null);
   const [loginError, setLoginError] = useState<string>();
 
@@ -21,6 +22,7 @@ export function App() {
     setLoginError(undefined);
     const client = createClient(signIn);
     clientRef.current = client;
+    setClient(client);
     setSession({ state: "idle" });
     let welcomed = false;
     client.onState((change) => {
@@ -34,6 +36,7 @@ export function App() {
       if (change.state === "closed" && change.error && change.error.code !== "closed") {
         if (change.error.code === "auth_failed") signOut();
         clientRef.current = null;
+        setClient(null);
         setSession(null);
         setLoginError(describe(change.error.code, change.error.message, welcomed));
         return;
@@ -61,11 +64,12 @@ export function App() {
     clientRef.current = null;
     client?.close();
     signOut();
+    setClient(null);
     setSession(null);
   }, []);
 
-  if (!session) return <Login onSubmit={start} error={loginError} />;
-  return <Connected session={session} onSignOut={logout} />;
+  if (!session || !client) return <Login onSubmit={start} error={loginError} />;
+  return <Connected client={client} session={session} onSignOut={logout} />;
 }
 
 function describe(code: string, message: string, welcomed: boolean): string {
