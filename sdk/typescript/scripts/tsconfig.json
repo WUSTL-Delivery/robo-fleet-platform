@@ -1,0 +1,11 @@
+{
+  // Node-side code: the generator and the tests. Type-checked only, never emitted.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "rootDir": "..",
+    "noEmit": true
+  },
+  "include": [".", "../test", "../src", "../vitest.config.ts"]
+}

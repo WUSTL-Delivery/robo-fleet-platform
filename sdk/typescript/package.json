@@ -1,0 +1,33 @@
+{
+  "name": "@fleet-platform/sdk",
+  "version": "0.0.0",
+  "private": true,
+  "description": "TypeScript SDK for fleet-platform: protocol types generated from protocol/schemas.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "gen": "tsx scripts/gen.ts",
+    "gen:check": "tsx scripts/gen.ts --check",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p scripts/tsconfig.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}
