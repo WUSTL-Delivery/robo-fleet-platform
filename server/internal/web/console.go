@@ -39,12 +39,18 @@ func consoleHandler(root fs.FS) (h http.Handler, ok bool) {
 		w.Write(index)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+		// An API path nothing else claimed (e.g. the admin API while it is off)
+		// is a 404 whatever the method, so a POST there doesn't read as 405.
+		if name == "api" || strings.HasPrefix(name, "api/") {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
 		if name == "" || name == "index.html" {
 			serveIndex(w)
 			return
