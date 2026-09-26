@@ -342,8 +342,8 @@ needs to command a robot uses the platform directly.
 
 ### 3.4 Thin club node on the robot (kind: `robot`, via `fleet_agent`)
 
-The generic `fleet_agent` (planned, `sdk/ros2`, Python) owns the socket, manifest,
-heartbeat, twist to `/cmd_vel`, lease check, and deadman. The club node is the ~50 lines
+The generic `fleet_agent` (`sdk/ros2`, Python) owns the socket, manifest, heartbeat,
+twist onto a `twist_mux` input, lease check, and deadman. The club node is the ~50 lines
 that make it a delivery robot:
 
 | It does | On the wire |
@@ -355,7 +355,10 @@ that make it a delivery robot:
 | Escalate when a leg fails (policy is club code) | `help.request {reason, context}` |
 | Stop autonomy on takeover | on `lease.granted`, cancel the active Nav2 goal; on `lease.revoked`, report leg invalidated and wait for a new assignment |
 
-Until `fleet_agent` exists, the robot side is the Python SDK used directly, as in §5.
+`fleet_agent` does not yet report pose, velocity or battery: delivery-robo publishes no
+odometry, no `NavSatFix` and no `BatteryState`, and runs no Nav2 action to cancel, so
+those four are named stubs in the node. `sdk/ros2/README.md` lists what each is blocked
+on. A robot outside that workspace can use the Python SDK directly instead, as in §5.
 
 ---
 
@@ -474,8 +477,8 @@ request/ack helper for channels.
 
 The robot side uses the Python SDK in `sdk/python` (`pip install -e sdk/python` from a
 checkout; not on PyPI yet). It owns the socket, enrollment, heartbeat, reconnect, the
-manifest, the lease check on twist, and the deadman. This is what `fleet_agent` will
-build on; the club node is the `on_assignment` and leg-reporting parts.
+manifest, the lease check on twist, and the deadman. This is what `fleet_agent`
+(`sdk/ros2`) builds on; the club node is the `on_assignment` and leg-reporting parts.
 
 The generic, runnable version (no ROS, no delivery vocabulary) is
 [`sdk/python/examples/robot.py`](../sdk/python/examples/robot.py), and
@@ -640,7 +643,8 @@ Read this before designing against the server. Each item is a known gap, not a h
 
 | Gap | Consequence for you | Where it lands |
 |---|---|---|
-| **SDKs are source-only, and there is no ROS 2 node yet.** `sdk/typescript` and `sdk/python` exist (§5), but neither is published to npm or PyPI, and `fleet_agent` (`sdk/ros2`) is not written | install from a checkout (`pip install -e sdk/python`); a ROS robot wires the Python SDK's `on_twist` / `on_lease` / `telemetry` to its topics by hand until `fleet_agent` does it | package publishing with the project rename; `fleet_agent` in the real-hardware phase |
+| **SDKs are source-only.** `sdk/typescript`, `sdk/python` (§5) and `sdk/ros2` (`fleet_agent`) all exist, but none of them is published to npm or PyPI | install from a checkout: `pip install -e sdk/python`, then build `fleet_agent` in your ROS workspace | package publishing, with the project rename |
+| **`fleet_agent` reports health only.** It bridges the manifest, lease-gated twist and `help.request`, but the robot it targets publishes no odometry, no `NavSatFix` and no `BatteryState`, so pose, velocity and battery are stubs (§3.4) | the console lists a real robot and can drive it, but cannot place it on the map | wiring each stub as its ROS input lands |
 | **Operator access is invite-only, from the CLI.** Operators redeem a single-use, expiring invite minted by `fleetctl invite operator` (D14), which needs the server's `FLEET_ADMIN_TOKEN`. There are no passwords, no roles, and no way to mint an invite from the console | whoever holds the admin token onboards every operator; an operator's token lives in their browser, and losing it means a new invite (revoke the lost one with `fleetctl client revoke`) | console-side invites through the same admin API, later |
 | **The console is basic.** It shows robots live on a map, renders what each manifest declares, and does take over / WASD / hand back. It does not render declared map layers yet, and a plain `go build` does not include it (`npm run embed` in `console/`, or the Docker image) | a service's layers have nowhere to show yet; build the image or embed the console before pointing an operator at `/` | layer rendering with the layer-streams work |
 | **Layer retention is in memory only** | the server replays each layer's latest declare and update to late `layers` subscribers, but a server restart forgets them, and a service's layers are dropped 5 minutes after it disconnects, so re-declare and re-send on every (re)connect | persisting layers in the store, if a deployment needs it |

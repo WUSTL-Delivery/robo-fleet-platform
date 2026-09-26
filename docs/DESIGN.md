@@ -299,14 +299,27 @@ well as geographic ones (D7).
 
 - Project name (rename before SDK imports spread). License: Apache-2.0 working default.
   (Go module path + schema `$id` host are placeholders until the rename.)
-- Exact protocol v0 schemas — **this is the next work item**: manifest, twist, pose
-  (frame-relative!), telemetry, envelope, help-request, lease messages, layer declaration.
 
-## Next session: start protocol v0
+## Where the build actually is (2026-09-26)
 
-First real commit. Suggested shape: `protocol/` with JSON Schemas for (1) connection
-envelope `{type, payload}` + auth hello, (2) manifest (drive contract, streams, channels,
-battery), (3) twist setpoint (+ lease id), (4) pose/telemetry (frame-relative pose!),
-(5) help request / lease grant/revoke / resume, (6) layer declaration (geojson + style
-rules). Validate against both a sim robot and the personal-fleet/indoor case before
-freezing. Sim-first: nothing lands without working against `sim/`.
+Roadmap steps 1–2 are done and step 3 has started. Shipped: `protocol/` v0 schemas, the
+Go server (auth, fleets, presence, intervention queue, channels, layers, WebRTC
+signaling), `sdk/typescript`, `sdk/python`, `sdk/ros2` (`fleet_agent`), the console
+(fleet list, live map, take over / WASD / hand back), `sim/`, and `fleetctl`. The honest
+gap list lives in `docs/INTEGRATION.md` §8 and is the thing to read before designing
+against any of it.
+
+**Next work item: console layer rendering** (roadmap step 4). Layers already exist end to
+end in the server and in both the TypeScript and Python SDKs, but the console cannot draw
+them, so a service's declared layers have nowhere to go. The club path service — campus
+waypoint graph, weighted A* — is being built against that hole right now, which makes
+this the one platform gap a reference-deployment consumer is already waiting on. D4's
+litmus test applies to the renderer: it consumes GeoJSON plus styling rules and never
+learns the name `campus-graph`.
+
+Then, in rough order: `fleet_agent`'s telemetry stubs as the robot's ROS inputs land
+(odometry, `NavSatFix`, `BatteryState`, Nav2 — `sdk/ros2/README.md` names the blocker for
+each); WebRTC media, so teleop video stops riding the bus; the project rename, which gets
+more expensive every week that SDK imports spread; then replay.
+
+Sim-first still holds: nothing lands without working against `sim/`.
