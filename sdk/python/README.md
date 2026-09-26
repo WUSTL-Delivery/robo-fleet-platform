@@ -107,6 +107,25 @@ Things to know:
   with `SSL_CERT_FILE=/etc/ssl/cert.pem`. A real robot hits the same error, so fix it
   before deploying one.
 
+## Fake robot
+
+`examples/fake_robot.py` pretends to be a robot so you can try a server by hand. It
+enrolls, shows up on the console map, wanders around a point while autonomous, drives
+under an operator's WASD, drains a battery, answers `jobs` channel messages, and can ask
+for help.
+
+```bash
+cd sdk/python/examples
+cp .env.example .env        # set FLEET_URL and FLEET_ENROLL_KEY
+./run_fake_robot.sh                       # fake-robot-01
+./run_fake_robot.sh --name fake-02 --help-after 30
+```
+
+`run_fake_robot.sh` loads `examples/.env` (git-ignored) and creates `sdk/python/.venv` on
+first use. While it runs, type `h` + Enter to ask for help, `p` to pause wandering, `q`
+to quit. The first run saves a token to `~/.fleet/<name>.json`; later runs come back as
+the same robot without the key. Retire test robots with `fleetctl client revoke`.
+
 ## API overview
 
 ```python
