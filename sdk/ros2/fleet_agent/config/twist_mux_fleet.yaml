@@ -1,0 +1,37 @@
+# delivery-robo's twist_mux config with the fleet input added.
+#
+# This is a drop-in replacement for
+# `sim/src/robo_courier/config/twist_mux.yaml` in the delivery-robo checkout. The only
+# change is the `fleet` block; the other three are unchanged.
+#
+# Priority 50 is the deliberate part. Remote teleop must outrank navigation (10) and the
+# tracker (20), because taking over is the whole point -- but it must stay under the
+# joystick (100). Whoever is standing next to the robot with a controller is the one who
+# can see it, and they keep the final say over an operator who is looking at a video
+# feed. Sheridan's levels: the local human stays above the remote one.
+#
+# `timeout: 0.5` is what makes handback work by itself: the agent stops publishing when
+# the lease ends, the mux drops the input half a second later, and navigation resumes
+# without anyone sending a "resume" message. fleet_agent's `stop_hold_s` (1.0 s) is set
+# longer than this on purpose, so the base is commanded to zero and held there until
+# after the mux has let go.
+twist_mux:
+  ros__parameters:
+    use_stamped: true
+    topics:
+      navigation:
+        topic   : cmd_vel
+        timeout : 0.5
+        priority: 10
+      tracker:
+        topic   : cmd_vel_tracker
+        timeout : 0.5
+        priority: 20
+      fleet:
+        topic   : cmd_vel_fleet
+        timeout : 0.5
+        priority: 50
+      joystick:
+        topic   : cmd_vel_joy
+        timeout : 0.5
+        priority: 100
