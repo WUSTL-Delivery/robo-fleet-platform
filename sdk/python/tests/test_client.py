@@ -225,6 +225,30 @@ async def test_takeover_by_same_identity_is_terminal_not_ping_pong(fleet_server,
     assert second.state is ConnectionState.OPEN
 
 
+async def test_token_revoked_while_connected_is_terminal(fleet_server, clients):
+    robot: RecordingClient = make(
+        clients, fleet_server, cls=RecordingClient, kind="robot", enrollment_key=fleet_server.enroll_key
+    )
+    welcome = await robot.connect()
+    closed = asyncio.ensure_future(wait_for_state(robot, ConnectionState.CLOSED))
+
+    def revoke() -> dict[str, Any]:
+        req = urllib.request.Request(
+            f"{fleet_server.http_url}/api/admin/fleets/{fleet_server.fleet}/clients/{welcome['client_id']}/revoke",
+            method="POST",
+            headers={"Authorization": f"Bearer {fleet_server.admin_token}"},
+        )
+        with urllib.request.urlopen(req) as res:
+            return json.load(res)
+
+    assert (await asyncio.to_thread(revoke))["disconnected"] is True
+    change = await closed
+    assert change.error is not None and change.error.code == "auth_failed"
+    await asyncio.sleep(0.3)
+    assert robot.state is ConnectionState.CLOSED
+    assert len(robot.sent_types("hello")) == 1  # no reconnect loop
+
+
 async def test_send_refused_while_not_open_and_close_is_idempotent(fleet_server, clients):
     client = make(clients, fleet_server, kind="service", enrollment_key=fleet_server.enroll_key)
     with pytest.raises(FleetClientError) as info:

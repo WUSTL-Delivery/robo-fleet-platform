@@ -31,9 +31,10 @@ logged and never breaks the connection loop or the other handlers.
 Reconnect policy: only transient failures retry (network drop, server restart,
 handshake timeout, heartbeat lapse = ``rate_limited``). Any other server
 refusal is terminal and closes the client: ``auth_failed`` (bad or revoked
-token, bad enrollment key), ``conflict`` (another connection took over this
-identity, so reconnecting would just kick it back and ping-pong; also a reused
-invite key), and the rest. The client never clears the token store by itself.
+token, including one revoked while connected; bad enrollment key),
+``conflict`` (another connection took over this identity, so reconnecting
+would just kick it back and ping-pong; also a reused invite key), and the
+rest. The client never clears the token store by itself.
 
 From synchronous code, run it with ``asyncio.run(client.run_forever())``.
 """
@@ -413,9 +414,10 @@ class FleetClient:
                     continue
                 if env["type"] == "error":
                     # After welcome, errors are replies to our sends and do not
-                    # close the socket, except these two, sent right before close.
+                    # close the socket, except these three, sent right before
+                    # close (auth_failed: this client's token was revoked).
                     code = env["payload"].get("code")
-                    if code in ("conflict", "rate_limited"):
+                    if code in ("conflict", "rate_limited", "auth_failed"):
                         last_error = _error_from(env)
                 self._dispatch(env)
         except ConnectionClosed:

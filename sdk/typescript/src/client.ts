@@ -48,9 +48,10 @@
 // Reconnect policy: only transient failures retry — network drop, server
 // restart, handshake timeout, heartbeat lapse (`rate_limited`). Any other server
 // refusal is terminal and closes the client: `auth_failed` (bad/revoked token,
-// bad enrollment key), `conflict` (another connection took over this identity,
-// so reconnecting would just kick it back and ping-pong; also a reused invite
-// key), and the rest. The client never clears the TokenStore by itself.
+// including one revoked while connected; bad enrollment key), `conflict`
+// (another connection took over this identity, so reconnecting would just kick
+// it back and ping-pong; also a reused invite key), and the rest. The client
+// never clears the TokenStore by itself.
 //
 // Browser-safe: uses the global WebSocket unless one is injected (Node 20 has no
 // global WebSocket; pass e.g. the `ws` package's constructor there).
@@ -583,9 +584,10 @@ export class FleetClient {
       } else if (env.type === "error") {
         // Before welcome any error is the handshake's answer. After it, errors
         // are replies to our sends and do not close the socket, except these
-        // two, which the server sends right before it closes.
+        // three, which the server sends right before it closes (auth_failed:
+        // this client's token was revoked).
         const c = env.payload.code;
-        if (!welcomed || c === "conflict" || c === "rate_limited") {
+        if (!welcomed || c === "conflict" || c === "rate_limited" || c === "auth_failed") {
           lastError = new FleetClientError(c, env.payload.message);
         }
       }

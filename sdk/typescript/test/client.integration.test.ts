@@ -171,6 +171,24 @@ describe("FleetClient against fleet-server", () => {
     expect(client.state).toBe("closed");
   });
 
+  it("stops for good when its token is revoked while connected", async () => {
+    const rec = recordingWebSocket();
+    const robot = makeClient({ kind: "robot", enrollmentKey: server.enrollKey, WebSocket: rec.WebSocket });
+    const welcome = await robot.connect();
+    const closed = waitForState(robot, "closed");
+    const res = await fetch(`${server.httpUrl}/api/admin/fleets/${server.fleet}/clients/${welcome.client_id}/revoke`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${server.adminToken}` },
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { disconnected: boolean }).disconnected).toBe(true);
+    const change = await closed;
+    expect(change.error?.code).toBe("auth_failed");
+    await new Promise((r) => setTimeout(r, 300));
+    expect(robot.state).toBe("closed");
+    expect(rec.sent.filter((e) => e.type === "hello")).toHaveLength(1); // no reconnect loop
+  });
+
   it("refuses send() while not open", () => {
     const client = makeClient({ kind: "service", enrollmentKey: server.enrollKey });
     expect(() => client.send("heartbeat", {})).toThrow(FleetClientError);
