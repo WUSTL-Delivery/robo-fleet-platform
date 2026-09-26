@@ -6,6 +6,8 @@
 //	fleetctl enroll-key create --fleet club [--ttl 720h]
 //	fleetctl enroll-key list --fleet club
 //	fleetctl enroll-key revoke --fleet club <key id>
+//	fleetctl client list --fleet club
+//	fleetctl client revoke --fleet club <client id>
 //	fleetctl --version
 //
 // fleetctl only talks HTTP to the server's admin API (FLEET_ADMIN_TOKEN on the
@@ -52,6 +54,10 @@ Usage:
       List a fleet's enrollment keys: id, state, created, expires, revoked.
   fleetctl enroll-key revoke --fleet <name> <key id>
       Stop new enrollments with a key. Clients already enrolled keep their tokens.
+  fleetctl client list --fleet <name>
+      List a fleet's robots, services and operators: id, kind, name, state.
+  fleetctl client revoke --fleet <name> <client id>
+      Revoke one client's token (a lost robot or laptop) and close its connection.
   fleetctl version | --version
       Print the fleetctl version.
 
@@ -83,6 +89,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = cmdInvite(args[1:], stdout, stderr)
 	case "enroll-key":
 		err = cmdEnrollKey(args[1:], stdout, stderr)
+	case "client":
+		err = cmdClient(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "fleetctl: unknown command %q\n\n%s", args[0], usage)
 		return 2
