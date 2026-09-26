@@ -1,6 +1,7 @@
 // Package gateway owns the WebSocket edge: accept, the enroll/hello handshake,
-// per-client send queues. BACKPRESSURE LIVES HERE (DESIGN.md D10): a slow
-// consumer overflows its queue and is disconnected; it never stalls the fleet.
+// per-client send queues and inbound rate limits. BACKPRESSURE LIVES HERE
+// (DESIGN.md D10): a slow consumer overflows its queue and is disconnected; a
+// chatty producer is throttled (ratelimit.go) and keeps its connection.
 package gateway
 
 import (
@@ -65,15 +66,20 @@ func (c *Conn) Send(env protocol.Envelope) bool {
 }
 
 // Close tears the connection down; the read loop returns and the handler's
-// OnDisconnect runs.
+// OnDisconnect runs. It does not wait for the peer's close handshake: the
+// callers drop peers that have lapsed or been superseded, and a frozen peer
+// would otherwise hold off robot.offline for the handshake timeout (5 s).
 func (c *Conn) Close() {
-	c.ws.Close(websocket.StatusNormalClosure, "server closed connection")
+	c.ws.CloseNow()
 }
 
 type Gateway struct {
 	Auth                Auth
 	Handler             Handler
 	HeartbeatIntervalMs int
+	// RateLimit meters telemetry and channel.publish per connection; the zero
+	// value disables it.
+	RateLimit RateLimit
 }
 
 func (g *Gateway) ServeWS(w http.ResponseWriter, r *http.Request) {
@@ -161,6 +167,7 @@ func (g *Gateway) serveSession(ctx context.Context, ws *websocket.Conn, env prot
 		ws.Close(websocket.StatusNormalClosure, "")
 	}()
 
+	lim := newLimiter(g.RateLimit)
 	for {
 		env, err := readEnvelope(ctx, ws, 0)
 		if err != nil {
@@ -168,6 +175,14 @@ func (g *Gateway) serveSession(ctx context.Context, ws *websocket.Conn, env prot
 		}
 		if env.V != protocol.Version {
 			c.Send(errEnvelope(protocol.ErrInvalidMessage, "unsupported protocol version", env.ID))
+			continue
+		}
+		if now := time.Now(); !lim.allow(env.Type, now) {
+			// Throttle, never disconnect: drop it, and say so at most once per
+			// notice window so the replies cannot overflow the send queue.
+			if lim.notify(now) {
+				c.Send(errEnvelope(protocol.ErrRateLimited, env.Type+" rate limit exceeded; dropping until the client slows down", env.ID))
+			}
 			continue
 		}
 		g.Handler.OnMessage(c, env)

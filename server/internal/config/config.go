@@ -22,16 +22,29 @@ type Config struct {
 	LeaseTTLMs          int    `yaml:"lease_ttl_ms"`
 	SweepMs             int    `yaml:"sweep_ms"`
 
+	// Per-connection inbound limits on the chatty message types (telemetry,
+	// channel.publish), each metered separately (DESIGN.md D2). Over-limit
+	// messages are dropped with a rate_limited notice; the socket stays open.
+	ClientMsgsPerSec int `yaml:"client_msgs_per_sec"`
+	ClientMsgsBurst  int `yaml:"client_msgs_burst"`
+
 	// Optional declarative bootstrap: on startup, ensure this fleet exists and
 	// that this enrollment key is registered for it. Lets an operator choose the
 	// key up front (e.g. a CI secret shared with the clients that will enroll)
 	// instead of minting one on the box with -bootstrap. Idempotent.
 	BootstrapFleet     string `yaml:"bootstrap_fleet"`
 	BootstrapEnrollKey string `yaml:"bootstrap_enroll_key"`
+
+	// AdminToken authenticates the admin HTTP API that fleetctl calls
+	// (DESIGN.md D14). Empty (the default) leaves the admin API unmounted.
+	AdminToken string `yaml:"admin_token"`
 }
 
 // MinEnrollKeyLen guards against seeding a guessable key.
 const MinEnrollKeyLen = 16
+
+// MinAdminTokenLen guards against a guessable admin token.
+const MinAdminTokenLen = 16
 
 func Default() Config {
 	return Config{
@@ -40,6 +53,8 @@ func Default() Config {
 		HeartbeatIntervalMs: 10000,
 		LeaseTTLMs:          15000,
 		SweepMs:             1000,
+		ClientMsgsPerSec:    50,
+		ClientMsgsBurst:     100,
 	}
 }
 
@@ -69,8 +84,11 @@ const (
 	EnvHeartbeatIntervalMs = "FLEET_HEARTBEAT_INTERVAL_MS"
 	EnvLeaseTTLMs          = "FLEET_LEASE_TTL_MS"
 	EnvSweepMs             = "FLEET_SWEEP_MS"
+	EnvClientMsgsPerSec    = "FLEET_CLIENT_MSGS_PER_SEC"
+	EnvClientMsgsBurst     = "FLEET_CLIENT_MSGS_BURST"
 	EnvBootstrapFleet      = "FLEET_BOOTSTRAP_FLEET"
 	EnvBootstrapEnrollKey  = "FLEET_BOOTSTRAP_ENROLL_KEY"
+	EnvAdminToken          = "FLEET_ADMIN_TOKEN"
 )
 
 func (c *Config) applyEnv(lookup func(string) (string, bool)) error {
@@ -86,6 +104,9 @@ func (c *Config) applyEnv(lookup func(string) (string, bool)) error {
 	if v, ok := lookup(EnvBootstrapEnrollKey); ok {
 		c.BootstrapEnrollKey = v
 	}
+	if v, ok := lookup(EnvAdminToken); ok {
+		c.AdminToken = v
+	}
 	for _, e := range []struct {
 		name string
 		dst  *int
@@ -93,6 +114,8 @@ func (c *Config) applyEnv(lookup func(string) (string, bool)) error {
 		{EnvHeartbeatIntervalMs, &c.HeartbeatIntervalMs},
 		{EnvLeaseTTLMs, &c.LeaseTTLMs},
 		{EnvSweepMs, &c.SweepMs},
+		{EnvClientMsgsPerSec, &c.ClientMsgsPerSec},
+		{EnvClientMsgsBurst, &c.ClientMsgsBurst},
 	} {
 		v, ok := lookup(e.name)
 		if !ok {
@@ -119,16 +142,25 @@ func (c Config) validate() (Config, error) {
 		return c, fmt.Errorf("config: lease_ttl_ms must be > 0")
 	case c.SweepMs <= 0:
 		return c, fmt.Errorf("config: sweep_ms must be > 0")
+	case c.ClientMsgsPerSec <= 0:
+		return c, fmt.Errorf("config: client_msgs_per_sec must be > 0")
+	case c.ClientMsgsBurst <= 0:
+		return c, fmt.Errorf("config: client_msgs_burst must be > 0")
 	case (c.BootstrapFleet == "") != (c.BootstrapEnrollKey == ""):
 		return c, fmt.Errorf("config: bootstrap_fleet and bootstrap_enroll_key must be set together")
 	case c.BootstrapEnrollKey != "" && len(c.BootstrapEnrollKey) < MinEnrollKeyLen:
 		return c, fmt.Errorf("config: bootstrap_enroll_key must be at least %d characters", MinEnrollKeyLen)
+	case c.AdminToken != "" && len(c.AdminToken) < MinAdminTokenLen:
+		return c, fmt.Errorf("config: admin_token must be at least %d characters", MinAdminTokenLen)
 	}
 	return c, nil
 }
 
 // Bootstrap reports whether declarative bootstrap is configured.
 func (c Config) Bootstrap() bool { return c.BootstrapFleet != "" }
+
+// AdminEnabled reports whether the admin API should be mounted.
+func (c Config) AdminEnabled() bool { return c.AdminToken != "" }
 
 func (c Config) HeartbeatInterval() time.Duration {
 	return time.Duration(c.HeartbeatIntervalMs) * time.Millisecond

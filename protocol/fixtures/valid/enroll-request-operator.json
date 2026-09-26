@@ -1,0 +1,9 @@
+{
+  "v": 0,
+  "type": "enroll.request",
+  "payload": {
+    "enrollment_key": "fp-oi-EXAMPLE_INVITE_NOT_REAL",
+    "kind": "operator",
+    "name": "alice"
+  }
+}

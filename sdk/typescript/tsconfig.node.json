@@ -1,0 +1,11 @@
+{
+  // Emits the Node-only entry (src/node.ts) with Node types. The main
+  // tsconfig.json excludes that file so browser-facing code cannot reach Node APIs.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": ["node"]
+  },
+  "include": ["src/node.ts"],
+  "exclude": []
+}

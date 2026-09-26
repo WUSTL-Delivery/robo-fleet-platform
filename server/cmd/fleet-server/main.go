@@ -24,8 +24,10 @@ import (
 	"syscall"
 	"time"
 
+	"fleetplatform/server/internal/admin"
 	"fleetplatform/server/internal/app"
 	"fleetplatform/server/internal/config"
+	"fleetplatform/server/internal/gateway"
 	"fleetplatform/server/internal/store"
 	"fleetplatform/server/internal/web"
 )
@@ -95,7 +97,12 @@ func main() {
 	defer stop()
 	go a.Run(ctx)
 
-	srv := &http.Server{Addr: cfg.Listen, Handler: web.Handler(a.Gateway())}
+	if cfg.AdminEnabled() {
+		slog.Info("admin API enabled", "path", "/api/admin/")
+	}
+	gw := a.Gateway()
+	gw.RateLimit = gateway.RateLimit{PerSec: float64(cfg.ClientMsgsPerSec), Burst: cfg.ClientMsgsBurst}
+	srv := &http.Server{Addr: cfg.Listen, Handler: web.Handler(gw, admin.Handler(st, cfg.AdminToken, a))}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -275,6 +275,26 @@ console/SDK/sim**. The new decision is the robot-side P2P client, which D10 left
   Python only at the robot edge; `protocol/` schemas are the single contract and each
   language's types are generated/validated from them (see docs/TESTING.md layer 1).
 
+## D14. Operator access: one-time invites minted by `fleetctl` (2026-09-25)
+
+- An operator gets a token by redeeming a **single-use, expiring invite key** through the
+  existing `enroll.request` flow with `kind: operator`. No passwords are stored; the
+  redeemed token is kept by the browser.
+- Invites are minted by **`fleetctl`**, a separate admin CLI (gcloud/kubectl-style), which
+  calls an **admin HTTP API** on the running server authenticated by an installation-level
+  admin token (`FLEET_ADMIN_TOKEN`; the admin API is off when unset). `fleetctl` never
+  touches the database.
+- Rejected: a flag on `fleet-server` itself to mint invites. That only works on the box
+  running the server and is a testing convenience, not a streamlined path.
+- Later, a signed-in operator may mint invites from the console through the same API.
+
+## D15. Console stack (2026-09-25)
+
+**Vite + React + MapLibre GL, no SSR.** Built to static assets and embedded in
+`fleet-server` via `go:embed`, so the deployment stays one image. It consumes
+`sdk/typescript`. MapLibre is open source and renders local-frame poses on a blank style as
+well as geographic ones (D7).
+
 ## Open decisions (still)
 
 - Project name (rename before SDK imports spread). License: Apache-2.0 working default.

@@ -6,8 +6,12 @@
     "enroll.request": {
       "type": "object",
       "properties": {
-        "enrollment_key": { "type": "string", "minLength": 1 },
-        "kind": { "enum": ["robot", "service"] },
+        "enrollment_key": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Fleet enrollment key for kind robot/service; the single-use operator invite key for kind operator. One field, one enroll flow."
+        },
+        "kind": { "enum": ["robot", "service", "operator"] },
         "name": { "type": "string", "maxLength": 64 },
         "agent": { "$ref": "#/$defs/agentInfo" }
       },

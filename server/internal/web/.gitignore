@@ -1,0 +1,4 @@
+# The console build is copied here (Dockerfile, or `npm run embed` in console/).
+# Only the placeholder is committed so `go build` works without npm.
+dist/*
+!dist/.gitkeep

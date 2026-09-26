@@ -1,0 +1,19 @@
+# The image build context is the repo root (server/Dockerfile). Keep it to what
+# the build reads: server/, console/, sdk/typescript/ sources.
+*
+!server/
+!console/
+!sdk/typescript/
+
+**/node_modules/
+**/dist/
+!server/internal/web/dist/.gitkeep
+server/bin/
+**/*.db
+**/*.db-journal
+**/*.db-wal
+**/*.db-shm
+server/fleet.yml
+server/config.example.yml
+**/*.test
+**/.DS_Store
