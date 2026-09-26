@@ -10,7 +10,7 @@ https://claude.ai/code/artifact/65c4a0dd-600d-4ef0-8c6e-0ad88974f5bf
 **READ `docs/DESIGN.md` before doing any design or implementation work** — it records all
 settled architecture decisions (D1–D12: topology, trust model, scope boundary, club
 integration, competitive landscape, server shape, deployment) so they don't get re-litigated,
-plus the sibling-repo audit findings and the next work item (protocol v0).
+plus the sibling-repo audit findings and where the build currently stands.
 
 `docs/INTEGRATION.md` is the guide for building an app on the platform (wire protocol
 essentials, the four client roles, runnable TS service + Python robot examples, the

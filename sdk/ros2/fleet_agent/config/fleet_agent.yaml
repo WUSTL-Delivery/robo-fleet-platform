@@ -1,0 +1,37 @@
+# fleet_agent parameters. Every value here is the node's own default made explicit;
+# override per robot rather than editing the node.
+#
+# The enrollment key is used exactly once, on first run, and then the token file is the
+# identity. Keep the key out of git: leave it empty here and pass FLEET_ENROLL_KEY in the
+# environment (a systemd unit's EnvironmentFile is the intended home).
+/**:
+  ros__parameters:
+    # ---- connection
+    # url and name are deliberately absent: the launch file always passes them, and an
+    # empty launch argument would override anything set here. Use `url:=` / `name:=`, or
+    # $FLEET_URL / $FLEET_NAME; unset, they resolve to ws://localhost:8080/ws and the
+    # hostname.
+    enrollment_key: ""             # empty -> $FLEET_ENROLL_KEY
+    token_file: "/var/lib/fleet_agent/token.json"
+
+    # ---- manifest: the console renders exactly what is declared here, nothing more
+    max_v_mps: 1.0
+    max_w_radps: 1.5
+    # Comma-separated, not YAML lists: rclpy cannot infer the element type of an empty
+    # array default. Cameras take an optional label after a colon.
+    cameras: ""                    # e.g. "front:RealSense RGB" -- declares only, no media plane yet
+    channels: ""                   # e.g. "assignment,edge_report" for the club node
+    behaviors: ""
+    declare_battery: false         # nothing publishes a battery yet (ROB-24)
+
+    # ---- twist out
+    cmd_vel_topic: "cmd_vel_fleet"
+    cmd_vel_stamped: true          # matches twist_mux use_stamped: true on delivery-robo
+    cmd_vel_frame_id: "base_link"
+    publish_rate_hz: 20.0          # must stay well inside the mux's 0.5 s timeout
+    stop_hold_s: 1.0               # keep publishing zeros this long after a lease ends
+
+    # ---- telemetry in
+    telemetry_rate_hz: 1.0         # the control plane; video never rides this socket
+    pose_frame_id: "map"
+    imu_topic: "imu/data"
