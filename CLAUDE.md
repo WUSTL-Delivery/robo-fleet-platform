@@ -16,6 +16,10 @@ plus the sibling-repo audit findings and the next work item (protocol v0).
 essentials, the four client roles, runnable TS service + Python robot examples, the
 delivery-gdg migration map, deployment, and the honest list of v0 gaps).
 
+`docs/FLEETCTL.md` is the reference for `fleetctl`, the admin CLI (operator invites,
+enrollment keys, listing and revoking clients). Agents use it or the admin API it
+documents, never the server's database, and ask a human before any `revoke`.
+
 ## Context
 
 Built by the software lead of the WashU GDG delivery robot project. Two sibling repos

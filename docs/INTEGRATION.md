@@ -78,7 +78,7 @@ Endpoints:
 Running `-bootstrap` again on an existing fleet mints another enrollment key for it. An
 enrollment key is reusable until it is revoked or expires, so treat it as a secret: it
 lets anyone register a robot or service into your fleet. Keys are managed at runtime
-with `fleetctl` against the admin API (`FLEET_ADMIN_TOKEN`, D14), never by editing the
+with `fleetctl` ([FLEETCTL.md](FLEETCTL.md)) against the admin API (`FLEET_ADMIN_TOKEN`, D14), never by editing the
 database:
 
 ```bash
