@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS clients (
 	name       TEXT NOT NULL DEFAULT '',
 	token_hash TEXT NOT NULL UNIQUE,
 	created_at INTEGER NOT NULL DEFAULT (unixepoch())
+	-- revoked_at: added by migrations below
 );
 CREATE TABLE IF NOT EXISTS enroll_keys (
 	id         TEXT PRIMARY KEY,
@@ -76,6 +77,7 @@ func OpenSqlite(path string) (*Sqlite, error) {
 var columnMigrations = []struct{ table, column, ddl string }{
 	{"enroll_keys", "expires_at", `ALTER TABLE enroll_keys ADD COLUMN expires_at INTEGER`}, // unix millis; NULL = never
 	{"enroll_keys", "revoked_at", `ALTER TABLE enroll_keys ADD COLUMN revoked_at INTEGER`}, // unix millis; NULL = not revoked
+	{"clients", "revoked_at", `ALTER TABLE clients ADD COLUMN revoked_at INTEGER`},         // unix millis; NULL = not revoked
 }
 
 func migrate(db *sql.DB) error {
@@ -251,13 +253,60 @@ func (s *Sqlite) CreateToken(fleetID string, kind Kind, name string) (string, Cl
 func (s *Sqlite) AuthToken(token string) (Client, bool, error) {
 	var c Client
 	var kind string
-	err := s.db.QueryRow(`SELECT id, fleet_id, kind, name FROM clients WHERE token_hash = ?`,
+	err := s.db.QueryRow(`SELECT id, fleet_id, kind, name FROM clients WHERE token_hash = ? AND revoked_at IS NULL`,
 		hashSecret(token)).Scan(&c.ID, &c.FleetID, &kind, &c.Name)
 	if err == sql.ErrNoRows {
 		return Client{}, false, nil
 	}
 	c.Kind = Kind(kind)
 	return c, err == nil, err
+}
+
+const clientCols = `id, fleet_id, kind, name, created_at, revoked_at`
+
+func scanClient(row interface{ Scan(...any) error }) (Client, error) {
+	var c Client
+	var kind string
+	var created int64
+	var revokedAt sql.NullInt64
+	if err := row.Scan(&c.ID, &c.FleetID, &kind, &c.Name, &created, &revokedAt); err != nil {
+		return Client{}, err
+	}
+	c.Kind = Kind(kind)
+	c.CreatedAt = time.Unix(created, 0)
+	if revokedAt.Valid {
+		c.RevokedAt = time.UnixMilli(revokedAt.Int64)
+	}
+	return c, nil
+}
+
+func (s *Sqlite) ListClients(fleetID string) ([]Client, error) {
+	rows, err := s.db.Query(`SELECT `+clientCols+` FROM clients WHERE fleet_id = ? ORDER BY created_at, rowid`, fleetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Client{}
+	for rows.Next() {
+		c, err := scanClient(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *Sqlite) RevokeClient(fleetID, id string) (Client, error) {
+	if _, err := s.db.Exec(`UPDATE clients SET revoked_at = ? WHERE id = ? AND fleet_id = ? AND revoked_at IS NULL`,
+		s.now().UnixMilli(), id, fleetID); err != nil {
+		return Client{}, err
+	}
+	c, err := scanClient(s.db.QueryRow(`SELECT `+clientCols+` FROM clients WHERE id = ? AND fleet_id = ?`, id, fleetID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Client{}, ErrClientNotFound
+	}
+	return c, err
 }
 
 func (s *Sqlite) CreateOperatorInvite(fleetID string, ttl time.Duration) (string, time.Time, error) {
@@ -324,7 +373,7 @@ func (s *Sqlite) RedeemOperatorInvite(key, name string) (string, Client, error) 
 }
 
 func (s *Sqlite) RobotsInFleet(fleetID string) ([]Client, error) {
-	rows, err := s.db.Query(`SELECT id, fleet_id, kind, name FROM clients WHERE fleet_id = ? AND kind = 'robot' ORDER BY created_at`, fleetID)
+	rows, err := s.db.Query(`SELECT id, fleet_id, kind, name FROM clients WHERE fleet_id = ? AND kind = 'robot' AND revoked_at IS NULL ORDER BY created_at`, fleetID)
 	if err != nil {
 		return nil, err
 	}

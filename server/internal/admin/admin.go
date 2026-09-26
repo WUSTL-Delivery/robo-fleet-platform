@@ -13,8 +13,15 @@
 //	POST /api/admin/fleets/{fleet}/enroll-keys/{id}/revoke
 //	  -> 200 the revoked key's record (idempotent); 404 if the id is not in that fleet
 //
+//	GET  /api/admin/fleets/{fleet}/clients
+//	  -> 200 {"clients": [{"id", "fleet_id", "kind", "name", "created_at", "revoked_at"?, "state"}]}
+//	POST /api/admin/fleets/{fleet}/clients/{id}/revoke
+//	  -> 200 the revoked client's record + "disconnected" (idempotent); 404 if the id is not in that fleet
+//
 // Revoking an enrollment key stops new enrollments with it; clients already
-// enrolled through it keep their tokens.
+// enrolled through it keep their tokens. Revoking a client kills its token:
+// its live connection (if any) is closed with error{code: auth_failed} and
+// every later hello is refused with auth_failed. Tokens are never listed.
 //
 // {fleet} is the fleet's name, the same name used by -bootstrap and
 // FLEET_BOOTSTRAP_FLEET.
@@ -60,7 +67,8 @@ type errorBody struct {
 
 // Handler returns the admin API, or nil when token is empty (admin API off).
 // Every route requires "Authorization: Bearer <token>", compared in constant time.
-func Handler(st store.Store, token string) http.Handler {
+// live closes revoked clients' connections; nil skips that (see LiveConns).
+func Handler(st store.Store, token string, live LiveConns) http.Handler {
 	if token == "" {
 		return nil
 	}
@@ -76,6 +84,12 @@ func Handler(st store.Store, token string) http.Handler {
 	})
 	mux.HandleFunc("POST /api/admin/fleets/{fleet}/enroll-keys/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
 		revokeEnrollKey(st, w, r)
+	})
+	mux.HandleFunc("GET /api/admin/fleets/{fleet}/clients", func(w http.ResponseWriter, r *http.Request) {
+		listClients(st, w, r)
+	})
+	mux.HandleFunc("POST /api/admin/fleets/{fleet}/clients/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
+		revokeClient(st, live, w, r)
 	})
 	return requireToken(token, mux)
 }

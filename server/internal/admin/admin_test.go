@@ -39,7 +39,7 @@ func newAdminInviteHarness(t *testing.T) *adminInviteHarness {
 		t.Fatal(err)
 	}
 	a := app.New(app.Config{HeartbeatInterval: time.Minute, LeaseTTL: 30 * time.Second, SweepEvery: 50 * time.Millisecond}, st)
-	srv := httptest.NewServer(web.Handler(a.Gateway(), admin.Handler(st, adminInviteTestToken)))
+	srv := httptest.NewServer(web.Handler(a.Gateway(), admin.Handler(st, adminInviteTestToken, a)))
 	t.Cleanup(srv.Close)
 	return &adminInviteHarness{t: t, srv: srv, store: st, fleet: fleet}
 }
@@ -133,7 +133,7 @@ func TestAdminInviteExpiredKeyIsRefused(t *testing.T) {
 }
 
 func TestAdminInviteAPIOffWithoutToken(t *testing.T) {
-	if admin.Handler(nil, "") != nil {
+	if admin.Handler(nil, "", nil) != nil {
 		t.Fatal("empty admin token must disable the admin API")
 	}
 	st, err := store.OpenSqlite(filepath.Join(t.TempDir(), "fleet.db"))
@@ -142,7 +142,7 @@ func TestAdminInviteAPIOffWithoutToken(t *testing.T) {
 	}
 	defer st.Close()
 	a := app.New(app.Config{HeartbeatInterval: time.Minute, LeaseTTL: time.Minute, SweepEvery: time.Second}, st)
-	srv := httptest.NewServer(web.Handler(a.Gateway(), admin.Handler(st, "")))
+	srv := httptest.NewServer(web.Handler(a.Gateway(), admin.Handler(st, "", a)))
 	defer srv.Close()
 	resp, err := http.Post(srv.URL+"/api/admin/fleets/club/operator-invites", "application/json", nil)
 	if err != nil {

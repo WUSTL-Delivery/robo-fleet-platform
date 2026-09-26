@@ -92,6 +92,22 @@ Revoking or expiring a key only stops **new** enrollments (`enroll.request` answ
 their tokens. Keys minted by `-bootstrap`, by `FLEET_BOOTSTRAP_ENROLL_KEY`, or before
 expiry existed never expire.
 
+Revoking a single client (a lost robot, a lost operator laptop) is the per-client
+counterpart, through the same admin API:
+
+```bash
+fleetctl client list   --fleet club-fleet             # id, kind, name, state, created, revoked (never tokens)
+fleetctl client revoke --fleet club-fleet r_...       # kills that one token, now
+```
+
+The token stops authenticating at once. If the client is connected, the server sends it
+`error{code: auth_failed, message: "token revoked"}` and closes the socket; teardown is the
+ordinary disconnect path (a robot goes `robot.offline`, an operator's leases are revoked
+with reason `operator_lost`). Every later `hello` with that token gets `auth_failed`, which
+both SDKs treat as terminal, so a revoked robot does not reconnect-loop. A revoked robot
+also drops out of snapshots. Nothing else in the fleet is touched. There is no un-revoke:
+enroll it again as a new client.
+
 From the published image, with no config file (every key has a `FLEET_*` environment
 variable; env beats file beats default):
 
@@ -161,6 +177,9 @@ Rules enforced by the gateway:
 - One live connection per identity. A second `hello` with the same token wins and the
   older socket gets `error{code: conflict}` then close. Reconnect with the same token;
   never re-enroll on reconnect.
+- A token revoked by an admin (§1, `fleetctl client revoke`) closes its live socket with
+  `error{code: auth_failed}` and is refused on every later `hello`. Treat `auth_failed`
+  as terminal; do not retry it.
 - Client ids are prefixed by kind: `r_…` robot, `s_…` service, `o_…` operator.
 
 ### 2.3 Heartbeat or die
@@ -263,7 +282,9 @@ service should still re-declare and re-send when it (re)connects.
 `error{code, message, ref}` with `code` one of `auth_failed`, `invalid_message`,
 `not_found`, `not_authorized`, `conflict`, `rate_limited`. `ref` is the `id` of the
 message that caused it when there was one. Errors do not close the socket except during
-the handshake and on heartbeat lapse.
+the handshake, on heartbeat lapse (`rate_limited`), on takeover by a newer connection
+(`conflict`), and on token revocation (`auth_failed`); in those cases the error is the
+last frame before the close.
 
 `telemetry` and `channel.publish` are rate limited per connection, each type with its own
 token bucket (`client_msgs_per_sec`, `client_msgs_burst`; defaults 50/s and 100). Over the
@@ -620,7 +641,7 @@ Read this before designing against the server. Each item is a known gap, not a h
 | Gap | Consequence for you | Where it lands |
 |---|---|---|
 | **SDKs are source-only, and there is no ROS 2 node yet.** `sdk/typescript` and `sdk/python` exist (§5), but neither is published to npm or PyPI, and `fleet_agent` (`sdk/ros2`) is not written | install from a checkout (`pip install -e sdk/python`); a ROS robot wires the Python SDK's `on_twist` / `on_lease` / `telemetry` to its topics by hand until `fleet_agent` does it | package publishing with the project rename; `fleet_agent` in the real-hardware phase |
-| **Operator access is invite-only, from the CLI.** Operators redeem a single-use, expiring invite minted by `fleetctl invite operator` (D14), which needs the server's `FLEET_ADMIN_TOKEN`. There are no passwords, no roles, and no way to mint an invite from the console | whoever holds the admin token onboards every operator; an operator's token lives in their browser, and losing it means a new invite | console-side invites through the same admin API, later |
+| **Operator access is invite-only, from the CLI.** Operators redeem a single-use, expiring invite minted by `fleetctl invite operator` (D14), which needs the server's `FLEET_ADMIN_TOKEN`. There are no passwords, no roles, and no way to mint an invite from the console | whoever holds the admin token onboards every operator; an operator's token lives in their browser, and losing it means a new invite (revoke the lost one with `fleetctl client revoke`) | console-side invites through the same admin API, later |
 | **The console is basic.** It shows robots live on a map, renders what each manifest declares, and does take over / WASD / hand back. It does not render declared map layers yet, and a plain `go build` does not include it (`npm run embed` in `console/`, or the Docker image) | a service's layers have nowhere to show yet; build the image or embed the console before pointing an operator at `/` | layer rendering with the layer-streams work |
 | **Layer retention is in memory only** | the server replays each layer's latest declare and update to late `layers` subscribers, but a server restart forgets them, and a service's layers are dropped 5 minutes after it disconnects, so re-declare and re-send on every (re)connect | persisting layers in the store, if a deployment needs it |
 | **Rate limits are per connection and per type, not per subscriber** | a chatty `telemetry` or `channel.publish` loop is throttled (§2.8), not disconnected; a slow *reader* still overflows its 64-deep send queue and is dropped | per-subscriber fan-out limits, later |

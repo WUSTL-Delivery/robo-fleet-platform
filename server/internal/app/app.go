@@ -83,10 +83,9 @@ func (a *App) Run(ctx context.Context) {
 			// rest (offline event, lease revocation) so both paths converge.
 			for _, e := range a.reg.SweepStale(now, a.cfg.HeartbeatInterval*5/2) {
 				if c := a.conn(e.Client.ID); c != nil {
-					c.Send(protocol.Msg(protocol.TypeError, protocol.ErrorMsg{
-						Code: protocol.ErrRateLimited, Message: "heartbeat lapsed",
-					}))
-					a.dropConn(c)
+					// One final error only: a second (conflict) would override
+					// rate_limited in the SDKs and turn a retryable lapse terminal.
+					a.closeWith(c, protocol.ErrRateLimited, "heartbeat lapsed")
 				}
 			}
 			// Leases: expiry is the server's transition (§7.5), robot → HELP_REQUESTED.
@@ -518,9 +517,29 @@ func (a *App) conn(clientID string) *gateway.Conn {
 	return a.conns[clientID]
 }
 
+// DisconnectClient closes the client's live connection, if it has one, after
+// telling it why with error{code: auth_failed}. The admin API calls it right
+// after revoking the client's token: auth_failed is the same code the next
+// hello will get, so the SDKs stop instead of reconnecting. Teardown runs
+// through OnDisconnect like any other drop (robot.offline, operator leases
+// revoked). Reports whether a live connection was closed.
+func (a *App) DisconnectClient(clientID string) bool {
+	c := a.conn(clientID)
+	if c == nil {
+		return false
+	}
+	a.closeWith(c, protocol.ErrAuthFailed, "token revoked")
+	return true
+}
+
 func (a *App) dropConn(c *gateway.Conn) {
-	// Closing the socket makes the read loop return, which runs OnDisconnect.
-	c.Send(protocol.Msg(protocol.TypeError, protocol.ErrorMsg{Code: protocol.ErrConflict, Message: "connection superseded or expired"}))
+	a.closeWith(c, protocol.ErrConflict, "connection superseded or expired")
+}
+
+// closeWith sends a final error, then closes the socket. Closing makes the
+// read loop return, which runs OnDisconnect.
+func (a *App) closeWith(c *gateway.Conn, code, message string) {
+	c.Send(protocol.Msg(protocol.TypeError, protocol.ErrorMsg{Code: code, Message: message}))
 	go func() {
 		time.Sleep(100 * time.Millisecond) // let the notice flush
 		c.Close()

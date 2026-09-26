@@ -26,7 +26,17 @@ type Client struct {
 	FleetID string
 	Kind    Kind
 	Name    string
+	// CreatedAt and RevokedAt are filled by ListClients and RevokeClient only.
+	// A non-zero RevokedAt means the client's token no longer authenticates.
+	CreatedAt time.Time
+	RevokedAt time.Time
 }
+
+// Revoked reports whether the client's token has been revoked.
+func (c Client) Revoked() bool { return !c.RevokedAt.IsZero() }
+
+// ErrClientNotFound: no client with that id in that fleet.
+var ErrClientNotFound = errors.New("store: client not found")
 
 // EnrollKey is an enrollment key's metadata; the plaintext is never stored.
 // A zero ExpiresAt means the key never expires (every key minted before
@@ -92,8 +102,17 @@ type Store interface {
 	// CreateToken mints an opaque per-client token (returned once, stored hashed).
 	CreateToken(fleetID string, kind Kind, name string) (string, Client, error)
 	// AuthToken resolves a presented token to its client; identity is always
-	// derived server-side from the credential, never claimed.
+	// derived server-side from the credential, never claimed. A revoked
+	// client's token does not authenticate.
 	AuthToken(token string) (Client, bool, error)
+	// ListClients returns every client of a fleet (robots, services,
+	// operators), revoked ones included, oldest first. Tokens are never listed.
+	ListClients(fleetID string) ([]Client, error)
+	// RevokeClient revokes the token of the client with that id in that fleet.
+	// Idempotent: revoking a revoked client returns it unchanged. An id not in
+	// the fleet returns ErrClientNotFound. Closing a live connection is the
+	// caller's job (the store does not know about connections).
+	RevokeClient(fleetID, id string) (Client, error)
 
 	// CreateOperatorInvite mints a single-use operator invite key for a fleet,
 	// valid for ttl (must be > 0). The plaintext is returned exactly once and
@@ -104,6 +123,7 @@ type Store interface {
 	// or expired key returns ErrInviteInvalid, ErrInviteUsed, or ErrInviteExpired.
 	RedeemOperatorInvite(key, name string) (token string, c Client, err error)
 
+	// RobotsInFleet returns the fleet's robots that are not revoked.
 	RobotsInFleet(fleetID string) ([]Client, error)
 
 	Close() error

@@ -102,7 +102,7 @@ func main() {
 	}
 	gw := a.Gateway()
 	gw.RateLimit = gateway.RateLimit{PerSec: float64(cfg.ClientMsgsPerSec), Burst: cfg.ClientMsgsBurst}
-	srv := &http.Server{Addr: cfg.Listen, Handler: web.Handler(gw, admin.Handler(st, cfg.AdminToken))}
+	srv := &http.Server{Addr: cfg.Listen, Handler: web.Handler(gw, admin.Handler(st, cfg.AdminToken, a))}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
