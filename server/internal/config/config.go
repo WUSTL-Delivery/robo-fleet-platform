@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -38,7 +39,19 @@ type Config struct {
 	// AdminToken authenticates the admin HTTP API that fleetctl calls
 	// (DESIGN.md D14). Empty (the default) leaves the admin API unmounted.
 	AdminToken string `yaml:"admin_token"`
+
+	// The console map's home view: where it opens and, with map_lock, the area
+	// it stays inside. Installation config, not domain logic: the platform only
+	// passes it to the console. Unset leaves the console fitting to the fleet.
+	MapCenter  string  `yaml:"map_center"`   // "lat,lon", e.g. "38.6488,-90.3108"
+	MapRadiusM float64 `yaml:"map_radius_m"` // metres around the centre to show
+	MapLock    bool    `yaml:"map_lock"`     // keep panning and zooming inside that area
+
+	mapLat, mapLon float64 // parsed from MapCenter by validate
 }
+
+// DefaultMapRadiusM applies when map_center is set without map_radius_m.
+const DefaultMapRadiusM = 1000
 
 // MinEnrollKeyLen guards against seeding a guessable key.
 const MinEnrollKeyLen = 16
@@ -89,6 +102,9 @@ const (
 	EnvBootstrapFleet      = "FLEET_BOOTSTRAP_FLEET"
 	EnvBootstrapEnrollKey  = "FLEET_BOOTSTRAP_ENROLL_KEY"
 	EnvAdminToken          = "FLEET_ADMIN_TOKEN"
+	EnvMapCenter           = "FLEET_MAP_CENTER"
+	EnvMapRadiusM          = "FLEET_MAP_RADIUS_M"
+	EnvMapLock             = "FLEET_MAP_LOCK"
 )
 
 func (c *Config) applyEnv(lookup func(string) (string, bool)) error {
@@ -106,6 +122,23 @@ func (c *Config) applyEnv(lookup func(string) (string, bool)) error {
 	}
 	if v, ok := lookup(EnvAdminToken); ok {
 		c.AdminToken = v
+	}
+	if v, ok := lookup(EnvMapCenter); ok {
+		c.MapCenter = v
+	}
+	if v, ok := lookup(EnvMapRadiusM); ok && v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return fmt.Errorf("config: %s=%q is not a number", EnvMapRadiusM, v)
+		}
+		c.MapRadiusM = f
+	}
+	if v, ok := lookup(EnvMapLock); ok && v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("config: %s=%q is not true or false", EnvMapLock, v)
+		}
+		c.MapLock = b
 	}
 	for _, e := range []struct {
 		name string
@@ -152,8 +185,51 @@ func (c Config) validate() (Config, error) {
 		return c, fmt.Errorf("config: bootstrap_enroll_key must be at least %d characters", MinEnrollKeyLen)
 	case c.AdminToken != "" && len(c.AdminToken) < MinAdminTokenLen:
 		return c, fmt.Errorf("config: admin_token must be at least %d characters", MinAdminTokenLen)
+	case c.MapRadiusM < 0:
+		return c, fmt.Errorf("config: map_radius_m must be > 0")
+	case c.MapCenter == "" && (c.MapRadiusM != 0 || c.MapLock):
+		return c, fmt.Errorf("config: map_radius_m and map_lock need map_center")
+	}
+	if c.MapCenter != "" {
+		lat, lon, err := parseLatLon(c.MapCenter)
+		if err != nil {
+			return c, fmt.Errorf("config: map_center: %w", err)
+		}
+		c.mapLat, c.mapLon = lat, lon
+		if c.MapRadiusM == 0 {
+			c.MapRadiusM = DefaultMapRadiusM
+		}
 	}
 	return c, nil
+}
+
+func parseLatLon(s string) (lat, lon float64, err error) {
+	parts := strings.Split(s, ",")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("%q is not \"lat,lon\"", s)
+	}
+	if lat, err = strconv.ParseFloat(strings.TrimSpace(parts[0]), 64); err != nil || lat < -90 || lat > 90 {
+		return 0, 0, fmt.Errorf("%q: latitude must be a number in [-90, 90]", s)
+	}
+	if lon, err = strconv.ParseFloat(strings.TrimSpace(parts[1]), 64); err != nil || lon < -180 || lon > 180 {
+		return 0, 0, fmt.Errorf("%q: longitude must be a number in [-180, 180]", s)
+	}
+	return lat, lon, nil
+}
+
+// MapView is the console's configured home view, or nil when none is set.
+type MapView struct {
+	Lat, Lon float64
+	RadiusM  float64
+	Lock     bool
+}
+
+// Map returns the console map's home view, or nil if map_center is unset.
+func (c Config) Map() *MapView {
+	if c.MapCenter == "" {
+		return nil
+	}
+	return &MapView{Lat: c.mapLat, Lon: c.mapLon, RadiusM: c.MapRadiusM, Lock: c.MapLock}
 }
 
 // Bootstrap reports whether declarative bootstrap is configured.

@@ -25,3 +25,11 @@ client_msgs_burst: 100
 # Leave unset to keep the admin API off. Prefer FLEET_ADMIN_TOKEN over putting
 # the secret in this file. At least 16 characters.
 # admin_token: ""
+
+# Console map home view: where the map opens, and how much around it to show.
+# Unset, the console fits the view to wherever the fleet is. With map_lock the
+# operator can't pan or zoom out beyond the area (with a 1.5x margin); "Home"
+# returns to it. Env: FLEET_MAP_CENTER, FLEET_MAP_RADIUS_M, FLEET_MAP_LOCK.
+# map_center: "38.6488,-90.3108"   # lat,lon
+# map_radius_m: 1000               # default 1000 when map_center is set
+# map_lock: false

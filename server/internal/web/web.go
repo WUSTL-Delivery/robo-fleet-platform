@@ -1,5 +1,5 @@
 // Package web mounts the HTTP surface: /ws for clients, /healthz, the admin
-// API, and the embedded console at /.
+// API, the console's config, and the embedded console at /.
 package web
 
 import (
@@ -11,7 +11,14 @@ import (
 // Handler builds the mux. admin, when non-nil, is mounted at /api/admin/
 // (internal/admin; nil means the admin API is off).
 func Handler(gw *gateway.Gateway, admin ...http.Handler) http.Handler {
+	return HandlerWithConsoleConfig(gw, ConsoleConfig{}, admin...)
+}
+
+// HandlerWithConsoleConfig is Handler plus the console's installation config,
+// served at GET /api/console/config.
+func HandlerWithConsoleConfig(gw *gateway.Gateway, cc ConsoleConfig, admin ...http.Handler) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/console/config", consoleConfigHandler(cc))
 	for _, h := range admin {
 		if h != nil {
 			mux.Handle("/api/admin/", h)

@@ -12,6 +12,7 @@
 #   FLEET_DB                     (default "/var/lib/fleet/fleet.db", set below)
 #   FLEET_HEARTBEAT_INTERVAL_MS  FLEET_LEASE_TTL_MS  FLEET_SWEEP_MS
 #   FLEET_CLIENT_MSGS_PER_SEC    FLEET_CLIENT_MSGS_BURST (per-connection rate limits)
+#   FLEET_MAP_CENTER "lat,lon"   FLEET_MAP_RADIUS_M  FLEET_MAP_LOCK (console map home view)
 # A -config file still works if you mount one.
 
 # ---- console ------------------------------------------------------------------

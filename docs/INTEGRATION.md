@@ -58,6 +58,9 @@ lease_ttl_ms: 15000            # teleop lease expires this long after grant/rene
 sweep_ms: 1000                 # how often lapsed heartbeats / expired leases are swept
 client_msgs_per_sec: 50        # per connection, telemetry and channel.publish each
 client_msgs_burst: 100         # back-to-back allowance before throttling starts
+map_center: "38.6488,-90.3108" # optional: console map opens here (lat,lon)
+map_radius_m: 1000             # how much around map_center to show
+map_lock: true                 # keep the operator's view inside that area
 EOF
 
 # First run: create a fleet and print an enrollment key (shown once, stored hashed).
@@ -74,6 +77,7 @@ Endpoints:
 | `/ws`      | the only client endpoint; every robot, service, operator     |
 | `/healthz` | `{"ok":true}`                                               |
 | `/`        | the ops console, when it is embedded in the build (§8)     |
+| `/api/console/config` | the console's installation config, e.g. `{"map": {"center": {"lat", "lon"}, "radius_m", "lock"}}`; public, nothing secret |
 
 Running `-bootstrap` again on an existing fleet mints another enrollment key for it. An
 enrollment key is reusable until it is revoked or expires, so treat it as a secret: it

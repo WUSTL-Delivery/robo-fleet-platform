@@ -9,6 +9,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 // once bundled; let Vite bundle the worker and hand MapLibre its URL.
 import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import { displayName, poseOf, type RobotView } from "./fleet/model";
+import { homeBounds, loadConsoleConfig, type MapHome } from "./consoleConfig";
 
 setWorkerUrl(maplibreWorkerUrl);
 
@@ -51,8 +52,11 @@ export function FleetMap({ robots, selectedId, onSelect }: Props) {
   const markers = useRef(new Map<string, { marker: Marker; el: HTMLDivElement }>());
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
-  // Auto-fit to the fleet until the operator moves the map themselves.
+  // Auto-fit to the fleet until the operator moves the map themselves. A
+  // configured home view (fleet-server map_center) replaces auto-fit: the map
+  // holds on that area, and "Fit fleet" / "Home" move it on request.
   const [follow, setFollow] = useState(true);
+  const [home, setHome] = useState<MapHome | null>(null);
   const fittedCount = useRef(0);
 
   const plotted: Plotted[] = [];
@@ -92,8 +96,17 @@ export function FleetMap({ robots, selectedId, onSelect }: Props) {
     map.on("dragstart", stopFollow);
     map.on("zoomstart", stopFollow);
     mapRef.current = map;
+    let cancelled = false;
+    void loadConsoleConfig().then(({ map: h }) => {
+      if (cancelled || !h) return;
+      if (h.lock) map.setMaxBounds(homeBounds(h, 1.5)); // a margin so edge robots aren't clipped
+      goHome(map, h);
+      setFollow(false);
+      setHome(h);
+    });
     const current = markers.current;
     return () => {
+      cancelled = true;
       current.clear();
       map.remove();
       mapRef.current = null;
@@ -166,6 +179,18 @@ export function FleetMap({ robots, selectedId, onSelect }: Props) {
             are plotted for now.
           </span>
         )}
+        {home && (
+          <button
+            className="secondary small"
+            title="Back to the configured home view"
+            onClick={() => {
+              if (mapRef.current) goHome(mapRef.current, home);
+              setFollow(false);
+            }}
+          >
+            Home
+          </button>
+        )}
         {!follow && plotted.length > 0 && (
           <button
             className="secondary small"
@@ -180,6 +205,10 @@ export function FleetMap({ robots, selectedId, onSelect }: Props) {
       </div>
     </div>
   );
+}
+
+function goHome(map: MapLibre, home: MapHome) {
+  map.fitBounds(homeBounds(home), { padding: 20, animate: false });
 }
 
 function fitTo(map: MapLibre, plotted: Plotted[]) {

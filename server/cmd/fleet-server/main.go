@@ -102,7 +102,12 @@ func main() {
 	}
 	gw := a.Gateway()
 	gw.RateLimit = gateway.RateLimit{PerSec: float64(cfg.ClientMsgsPerSec), Burst: cfg.ClientMsgsBurst}
-	srv := &http.Server{Addr: cfg.Listen, Handler: web.Handler(gw, admin.Handler(st, cfg.AdminToken, a))}
+	var cc web.ConsoleConfig
+	if m := cfg.Map(); m != nil {
+		cc.Map = &web.MapView{Center: web.LatLon{Lat: m.Lat, Lon: m.Lon}, RadiusM: m.RadiusM, Lock: m.Lock}
+		slog.Info("console map home view", "lat", m.Lat, "lon", m.Lon, "radius_m", m.RadiusM, "lock", m.Lock)
+	}
+	srv := &http.Server{Addr: cfg.Listen, Handler: web.HandlerWithConsoleConfig(gw, cc, admin.Handler(st, cfg.AdminToken, a))}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
