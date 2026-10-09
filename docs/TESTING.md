@@ -79,6 +79,13 @@ Same suite shape repeats in `sdk/python` (pytest) against the same binary — on
 every SDK, identical semantics. `sim/` is this fixture productized: the sim fleet is
 "N fake robots via the TS SDK," so the demo and the test share code.
 
+`sdk/go` does the same in Go: `cd sdk/go && go test ./...`. The shared helper
+`sdk/go/internal/fleettest` builds `fleet-server` once per test package (`fleettest.Main`
+from `TestMain`), starts a fresh one per test (`fleettest.Start`), and offers a TCP proxy
+(`Server.Proxy`) to drop, stall, or black out the connection. The SDK never imports server
+packages; it builds the binary. `GOTOOLCHAIN=go1.24.0 go test ./...` holds the SDK's Go
+floor: the helper still builds the server with a newer `go` from `PATH`.
+
 Robot-specific timing tests live with `sdk/ros2` later: deadman fires at ~300ms without
 valid twist (fake clock), twist rejected without current lease id.
 
