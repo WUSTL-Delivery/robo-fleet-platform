@@ -5,7 +5,8 @@ WebSocket, enrolls once with the fleet's enrollment key, and from then on reconn
 with the same token. The SDK owns the connection, heartbeat, reconnect, the lease check
 on teleop, and the deadman stop. Your code owns what the robot does.
 
-Python 3.10+. One runtime dependency (`websockets`).
+Python 3.10+. One runtime dependency (`websockets`); the optional `webrtc` extra adds
+`aiortc` for [twist over a WebRTC data channel](#twist-over-webrtc).
 
 ## Install
 
@@ -15,7 +16,8 @@ named). From a checkout of this repo:
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -e sdk/python
+pip install -e sdk/python              # bus twist only
+pip install -e 'sdk/python[webrtc]'    # also answers the operator's WebRTC offer
 ```
 
 ## Quickstart
@@ -122,7 +124,10 @@ cp .env.example .env        # set FLEET_URL and FLEET_ENROLL_KEY
 ```
 
 `run_fake_robot.sh` loads `examples/.env` (git-ignored) and creates `sdk/python/.venv` on
-first use. While it runs, type `h` + Enter to ask for help, `p` to pause wandering, `q`
+first use, with the `webrtc` extra, so the fake robot answers the console's WebRTC offer
+and prints `twist over the WebRTC data channel` or `twist over the bus` as the operator's
+transport changes (`--no-data-channel` keeps it on the bus; `--ice-servers` or
+`FLEET_ICE_SERVERS` takes a JSON list of STUN/TURN servers). While it runs, type `h` + Enter to ask for help, `p` to pause wandering, `q`
 to quit. The first run saves a token to `~/.fleet/<name>.json`; later runs come back as
 the same robot without the key. Retire test robots with `fleetctl client revoke`.
 
@@ -164,12 +169,14 @@ await robot.close()
 | `await connect()` | `enroll.request` (first run only), `hello`, then the `manifest`. Returns the `welcome` payload |
 | `await telemetry(pose=, battery=, velocity=, health=)` | one `telemetry`. Pose comes from `geo_pose()` or `local_pose()`, never bare lat/lon. Returns `False` (and drops the sample) while disconnected |
 | `await request_help(reason, context=None)` | `help.request`: the robot raises its hand for an operator |
-| `on_twist(handler)` | `handler(TwistCommand)`: `linear_x`, `linear_y`, `angular_z`, `source` (`operator`, `deadman`, `revoked`, `disconnected`), `lease_id`, `is_stop` |
+| `Robot(..., data_channel=None, ice_servers=None)` | nothing on the wire. With the `webrtc` extra installed the robot answers the lease holder's WebRTC offer; see [Twist over WebRTC](#twist-over-webrtc) |
+| `on_twist(handler)` | `handler(TwistCommand)`: `linear_x`, `linear_y`, `angular_z`, `source` (`operator`, `deadman`, `revoked`, `disconnected`), `lease_id`, `is_stop`, `via` (`bus` or `p2p` for an operator setpoint, `None` for a stop) |
 | `on_lease(handler)` | `handler(LeaseChange)`: `granted`, `lease_id`, `operator_id`, `reason` on revoke |
 | `channel(name).on_message(handler)` | `handler(sender, data)` for `channel.message`; `sender` is stamped by the server |
 | `channel(name).on_acked(handler)` | `handler(sender, data)` once per acked send, with the inner `data`; the SDK publishes `{"ack": seq}` back when it returns without raising, and again for every repeat. See [Acked receive](#acked-receive) |
 | `await channel(name).publish(data, to=None)` | `channel.publish`, directed or broadcast. A directed send waits 0.5 s for a `not_found` reply; silence is not a delivery receipt |
 | `robot.robot_id`, `.state`, `.mode`, `.lease` | this robot's id, connection state, `autonomous`/`help`/`teleop`, current lease |
+| `robot.data_channel_enabled`, `.data_channel_open` | whether the robot answers WebRTC offers at all, and whether a twist data channel is open right now |
 | `robot.client` | the underlying `FleetClient`, for message types `Robot` does not wrap |
 
 Handlers may be plain functions or `async def`; a coroutine handler runs as its own task.
@@ -246,6 +253,64 @@ robot that also runs its own autonomy should pause it on `on_lease` grant and de
 revoke whether to resume (`robot.mode` is `autonomous` after a handback, `help` after an
 expiry or a lost operator).
 
+## Twist over WebRTC
+
+While an operator holds the lease, the console offers a direct WebRTC data channel and
+sends twist on it instead of through the server. The contract is
+[`protocol/README.md`, "Teleop data plane"](../../protocol/README.md#teleop-data-plane-twist-over-webrtc);
+this SDK implements the robot's side of it with [aiortc](https://github.com/aiortc/aiortc).
+
+```bash
+pip install -e 'sdk/python[webrtc]'
+```
+
+That is all it takes: with aiortc importable, `Robot` answers the offer, and channel
+twists reach the same `on_twist` handler as bus twists.
+
+```python
+robot = Robot(url, manifest=..., name="bot-1", token_store=...,
+              ice_servers=[{"urls": "stun:stun.example.org:3478"},
+                           {"urls": "turn:turn.example.org:3478", "username": "u", "credential": "p"}])
+robot.on_twist(lambda cmd: base.drive(cmd.linear_x, cmd.angular_z))   # cmd.via is "bus" or "p2p"
+```
+
+| `data_channel=` | behaviour |
+|---|---|
+| `None` (default) | on if aiortc is installed, off if it is not |
+| `True` | on; `Robot(...)` raises `ImportError` if aiortc is missing |
+| `False` | off: offers are ignored and the operator stays on the bus |
+
+- **Nothing about authority changes.** The robot answers only the operator named in its
+  current lease, for that lease id. Every channel twist passes the same lease check as a
+  bus twist and restarts the same 300 ms deadman. A revoke closes the peer connection;
+  closing a peer connection never ends a lease.
+- **`ice_servers` has no default.** With none, only host candidates are used, which is
+  enough on one machine or one LAN and sends nothing to a third party. Across networks
+  (robot on LTE, operator at home) give both sides a STUN server, and a TURN server if
+  either is behind a symmetric NAT. Each entry is `{"urls": ..., "username": ...,
+  "credential": ...}`.
+- **One transport at a time is the operator's job; the robot takes both.** A bus twist is
+  ignored if a channel twist was obeyed within the last 300 ms, so a late bus twist cannot
+  replace a newer setpoint. Channel twists carry a `seq`; older or repeated ones are
+  dropped.
+- **Losing the direct link is not a stop by itself.** When the peer connection closes or
+  fails, the robot drops that session, keeps the lease, and waits for a new offer. The
+  operator falls back to bus twist; if nothing arrives the deadman stops the robot 300 ms
+  after the last twist it obeyed, as on any transport.
+- **Losing the server link is.** The robot stops at once (`disconnected`) and obeys no
+  channel twist until the control connection is back, because it could not hear a revoke.
+- **No extra, no change.** Without aiortc, `import fleet` and everything above the data
+  channel work as before, and the robot is driven over the bus.
+
+Limits of this implementation: aiortc gathers all its candidates before answering, so the
+answer takes a moment longer than a trickling peer's and the robot sends no `ice` signals
+(it accepts the operator's). aiortc offers no loopback candidate, so a robot and a console
+on the same machine connect through one of that machine's network addresses and need at
+least one interface up. Video is not carried yet.
+
+`fleet/webrtc.py` holds the peer (`TwistAnswerer`) and the message parser
+(`parse_channel_message`); it is the only module that imports aiortc.
+
 ## Tests
 
 Every test runs against the real `fleet-server` binary on an ephemeral port (Go must be
@@ -254,4 +319,13 @@ installed; the fixture builds it once per session):
 ```bash
 pip install -e 'sdk/python[dev]'
 cd sdk/python && pytest
+```
+
+`tests/test_webrtc.py` needs the `webrtc` extra and is skipped without it
+(`pip install -e 'sdk/python[dev,webrtc]'` to run it). It drives the robot from a scripted
+aiortc offerer through the server's signal relay. The same robot is driven by the
+console's own twist transport in `sim/test/pyrobot.interop.test.ts`, which is opt-in:
+
+```bash
+cd sim && FLEET_PYTHON=/path/to/venv/bin/python npx vitest run test/pyrobot.interop.test.ts
 ```

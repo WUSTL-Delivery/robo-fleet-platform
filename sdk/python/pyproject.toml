@@ -16,6 +16,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Twist over a WebRTC data channel (fleet/webrtc.py; protocol/README.md, "Teleop data
+# plane"). Optional: without it the robot is driven over the bus and nothing else changes.
+webrtc = [
+  "aiortc>=1.9",
+]
 dev = [
   "pytest>=8",
   "pytest-asyncio>=0.24",

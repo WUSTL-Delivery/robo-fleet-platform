@@ -24,7 +24,7 @@ from .client import (
     FleetClientError,
     StateChange,
 )
-from .robot import DEADMAN_MS, LeaseChange, Robot, TwistCommand, geo_pose, local_pose
+from .robot import DEADMAN_MS, LeaseChange, Robot, TwistCommand, TwistVia, geo_pose, local_pose
 from .token_store import Credentials, FileTokenStore, MemoryTokenStore, TokenStore
 
 __version__ = "0.0.1"
@@ -53,6 +53,7 @@ __all__ = [
     "StateChange",
     "TokenStore",
     "TwistCommand",
+    "TwistVia",
     "geo_pose",
     "local_pose",
 ]

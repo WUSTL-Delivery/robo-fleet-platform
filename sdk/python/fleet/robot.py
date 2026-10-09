@@ -15,6 +15,12 @@ robot half of the wire protocol (docs/INTEGRATION.md, docs/DESIGN.md D3):
   ``deadman_ms`` (300 ms) after the last valid twist, and a lease revoke or a
   lost link commands zero velocity immediately. The robot never waits for the
   server to say the operator left.
+- **Twist over WebRTC** (optional; protocol/README.md, "Teleop data plane"):
+  with the ``webrtc`` extra installed, the robot answers the lease holder's
+  WebRTC offer and also takes twist from the ``twist`` data channel. Both
+  transports go through the same lease check and the same deadman, so
+  ``on_twist`` behaves the same on either. Without the extra, or when no peer
+  connection comes up, twist arrives over the bus as before.
 
 Every hook is shaped so a ROS 2 node can map it one to one::
 
@@ -35,7 +41,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Optional, Union
 
@@ -51,6 +57,7 @@ __all__ = [
     "Robot",
     "TwistCommand",
     "TwistSource",
+    "TwistVia",
     "geo_pose",
     "local_pose",
 ]
@@ -65,6 +72,9 @@ Mode = Literal["autonomous", "help", "teleop"]
 
 #: Why a twist command was issued: an operator setpoint, or one of the three stops.
 TwistSource = Literal["operator", "deadman", "revoked", "disconnected"]
+
+#: How an operator's twist reached the robot: the control-plane bus, or the WebRTC data channel.
+TwistVia = Literal["bus", "p2p"]
 
 
 @dataclass(frozen=True)
@@ -81,6 +91,8 @@ class TwistCommand:
     source: TwistSource
     #: The lease the command was issued under; None for a stop after the lease is gone.
     lease_id: Optional[str]
+    #: The transport an operator setpoint arrived on; None for a stop the SDK issued.
+    via: Optional[TwistVia] = None
 
     @property
     def is_stop(self) -> bool:
@@ -158,6 +170,8 @@ class Robot:
         reconnect: Backoff | None = Backoff(),
         handshake_timeout: float = 10.0,
         deadman_ms: int = DEADMAN_MS,
+        data_channel: bool | None = None,
+        ice_servers: Sequence[Any] | None = None,
     ) -> None:
         """
         Args:
@@ -167,6 +181,15 @@ class Robot:
             name, enrollment_key, token_store, agent, reconnect, handshake_timeout:
                 passed to the underlying FleetClient (kind is always ``robot``).
             deadman_ms: zero velocity this long after the last valid twist.
+            data_channel: whether to answer the lease holder's WebRTC offer and
+                take twist from the data channel as well as the bus. None (the
+                default) turns it on when the ``webrtc`` extra (aiortc) is
+                installed; True requires it (ImportError if it is missing);
+                False keeps the robot on bus twist only.
+            ice_servers: STUN/TURN servers for the peer connection, each
+                ``{"urls": ..., "username": ..., "credential": ...}``. There is
+                no default: with none, only host candidates are used, which is
+                enough on loopback or one LAN.
         """
         self._client = FleetClient(
             url,
@@ -188,6 +211,20 @@ class Robot:
         self._lease_handlers: list[LeaseHandler] = []
         self._twist_handlers: list[TwistHandler] = []
         self._tasks: set[asyncio.Task[Any]] = set()
+        #: Loop time of the last data-channel twist obeyed (the bus-shadow rule).
+        self._p2p_at = float("-inf")
+        self._peer: Any = None  # fleet.webrtc.TwistAnswerer when the data channel is on
+        if data_channel is not False:
+            try:
+                from .webrtc import TwistAnswerer
+            except ImportError as e:
+                if data_channel:
+                    raise ImportError(
+                        "data_channel=True needs aiortc: pip install 'fleet-sdk[webrtc]'"
+                    ) from e
+            else:
+                self._peer = TwistAnswerer(self._client, on_twist=self._on_channel_twist, ice_servers=ice_servers)
+                self._client.on("signal", self._on_signal)
 
         self._client.on_state(self._on_state)
         self._client.on("lease.granted", self._on_granted)
@@ -232,6 +269,16 @@ class Robot:
         """The last command handed to the twist handlers."""
         return self._last_twist
 
+    @property
+    def data_channel_enabled(self) -> bool:
+        """Whether this robot answers WebRTC offers (the ``webrtc`` extra is installed and not turned off)."""
+        return self._peer is not None
+
+    @property
+    def data_channel_open(self) -> bool:
+        """Whether a twist data channel to the lease holder is open right now."""
+        return self._peer is not None and self._peer.open
+
     # ------------------------------------------------------------------ lifecycle
 
     async def connect(self) -> dict[str, Any]:
@@ -240,7 +287,11 @@ class Robot:
 
     async def close(self) -> None:
         """Stops (zero velocity if a lease was held) and closes the connection."""
-        await self._client.close()
+        try:
+            await self._client.close()
+        finally:
+            if self._peer is not None:
+                await self._peer.aclose()
 
     async def run_forever(self) -> None:
         """Connects and stays connected until close() or a terminal failure."""
@@ -313,7 +364,8 @@ class Robot:
         """Calls ``handler(TwistCommand)`` for each valid twist and for every stop.
 
         Valid means it bears the lease this robot holds and the manifest declares
-        a drive. Stops (zero velocity) come from the deadman, a revoke, a new
+        a drive. It may have come over the bus or the WebRTC data channel
+        (``cmd.via``); the lease check and the deadman are the same. Stops (zero velocity) come from the deadman, a revoke, a new
         lease replacing a moving one, or a lost link.
         """
         return _add(self._twist_handlers, handler)
@@ -334,6 +386,11 @@ class Robot:
             return self._declare()  # scheduled by the client as its own task
         if change.state in (ConnectionState.RECONNECTING, ConnectionState.CLOSED):
             self._halt("disconnected")
+            self._p2p_at = float("-inf")
+            # A blip keeps the peer (channel twist is not obeyed until the link
+            # is back); a closed client will never hear a revoke, so it goes.
+            if change.state is ConnectionState.CLOSED and self._peer is not None:
+                self._peer.revoke()
         return None
 
     async def _declare(self) -> None:
@@ -355,6 +412,7 @@ class Robot:
         if self._lease_id is not None and lease_id != self._lease_id:
             # A steal: the old driver's last setpoint must not carry over.
             self._halt("revoked")
+            self._p2p_at = float("-inf")
         self._lease_id = lease_id
         self._mode = "teleop"
         self._lease = LeaseChange(
@@ -363,6 +421,13 @@ class Robot:
             operator_id=p.get("operator_id"),
             expires_at_ms=p.get("expires_at_ms"),
         )
+        if self._peer is not None:
+            operator_id = p.get("operator_id")
+            if isinstance(operator_id, str) and operator_id:
+                # Only this operator's offer is answered; a peer from an earlier lease is closed.
+                self._peer.grant(lease_id, operator_id)
+            else:
+                self._peer.revoke()
         self._emit(self._lease_handlers, self._lease)
 
     def _on_revoked(self, env: Envelope) -> None:
@@ -374,16 +439,40 @@ class Robot:
         self._halt("revoked")
         self._lease_id = None
         self._lease = None
+        self._p2p_at = float("-inf")
+        if self._peer is not None:
+            self._peer.revoke()  # cleanup that follows the lease decision, never the cause of it
         # Handback resumes autonomy; expiry / operator loss / steal leave it needing help.
         self._mode = "autonomous" if reason == "released" else "help"
         self._emit(self._lease_handlers, LeaseChange(granted=False, lease_id=lease_id, reason=reason))
 
     def _on_twist_env(self, env: Envelope) -> None:
-        p = env["payload"]
+        self._obey(env["payload"], "bus")
+
+    def _on_channel_twist(self, payload: Mapping[str, Any]) -> bool:
+        """A twist from the data channel, already newer than the last one obeyed there."""
+        return self._obey(payload, "p2p")
+
+    def _on_signal(self, env: Envelope) -> None:
+        self._peer.on_signal(env["payload"])
+
+    def _obey(self, p: Mapping[str, Any], via: TwistVia) -> bool:
+        """The one gate every operator twist passes, whichever transport it came on.
+
+        Returns whether it was obeyed.
+        """
         if self._lease_id is None or p.get("lease_id") != self._lease_id:
-            return  # not the current lease: never obey
+            return False  # not the current lease: never obey
         if "drive" not in self._manifest:
-            return  # declared no drive: nothing to obey
+            return False  # declared no drive: nothing to obey
+        now = asyncio.get_running_loop().time()
+        if via == "p2p":
+            if self._client.state is not ConnectionState.OPEN:
+                return False  # no control link: a revocation could not be heard
+        elif now - self._p2p_at <= self._deadman_s:
+            # A bus twist still in flight when the operator moved to the faster
+            # path must not replace a newer setpoint.
+            return False
         try:
             linear = p["linear"]
             cmd = TwistCommand(
@@ -392,12 +481,16 @@ class Robot:
                 angular_z=float(p["angular"]["z_radps"]),
                 source="operator",
                 lease_id=self._lease_id,
+                via=via,
             )
         except (KeyError, TypeError, ValueError, AttributeError):
             log.warning("ignoring malformed twist: %r", p)
-            return
+            return False
+        if via == "p2p":
+            self._p2p_at = now
         self._arm_deadman()
         self._command(cmd)
+        return True
 
     def _arm_deadman(self) -> None:
         if self._deadman is not None:

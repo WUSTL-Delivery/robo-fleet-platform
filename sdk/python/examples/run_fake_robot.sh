@@ -16,7 +16,8 @@ fi
 if [[ ! -x "$sdk/.venv/bin/python" ]]; then
   echo "creating $sdk/.venv and installing the SDK..." >&2
   python3 -m venv "$sdk/.venv"
-  "$sdk/.venv/bin/pip" install -q -e "$sdk"
+  # With the webrtc extra (twist over a data channel); without it if aiortc will not install here.
+  "$sdk/.venv/bin/pip" install -q -e "$sdk[webrtc]" || "$sdk/.venv/bin/pip" install -q -e "$sdk"
 fi
 
 export PYTHONUNBUFFERED=1

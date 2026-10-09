@@ -135,7 +135,8 @@ async def teardown():
 
 async def start_robot(server: Any, teardown: list[Any], **kw: Any) -> tuple[Robot, TwistLog, list[LeaseChange]]:
     kw.setdefault("manifest", DRIVE_MANIFEST)
-    robot = Robot(server.ws_url, name="robot-role-bot", enrollment_key=server.enroll_key, reconnect=FAST, **kw)
+    kw.setdefault("reconnect", FAST)
+    robot = Robot(server.ws_url, name="robot-role-bot", enrollment_key=server.enroll_key, **kw)
     teardown.append(robot)
     twists = TwistLog()
     leases: list[LeaseChange] = []

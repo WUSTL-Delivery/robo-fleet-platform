@@ -159,6 +159,14 @@ jobs:
 
       - run: python -m pytest
 
+      # The run above is the SDK without its optional extra: `import fleet` and bus twist
+      # must work with no aiortc, and tests/test_webrtc.py skips itself. Now add the extra
+      # and run the data-channel tests (aiortc offerer to the SDK's robot, real server).
+      - name: data-channel tests with the webrtc extra
+        run: |
+          python -m pip install -e '.[webrtc]'
+          python -m pytest tests/test_webrtc.py
+
   sim:
     name: Sim fleet
     runs-on: ubuntu-latest
