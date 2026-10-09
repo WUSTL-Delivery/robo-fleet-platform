@@ -314,7 +314,9 @@ func (a *App) OnMessage(c *gateway.Conn, env protocol.Envelope) {
 			c.Send(errMsg(protocol.ErrNotAuthorized, "no live lease for twist", env.ID))
 			return
 		}
-		if rc := a.conn(robotID); rc != nil {
+		// Leases are only granted inside a fleet (handleClaim); the fleet check
+		// here keeps twist inside it even if that ever stops being true.
+		if rc := a.conn(robotID); rc != nil && rc.Client.FleetID == c.Client.FleetID {
 			rc.Send(env) // control-plane fallback path; the real one is the P2P datachannel
 		}
 
@@ -399,7 +401,11 @@ func (a *App) handleLayer(c *gateway.Conn, env protocol.Envelope) {
 }
 
 func (a *App) handleClaim(c *gateway.Conn, env protocol.Envelope, claim protocol.LeaseClaim) {
-	if _, online := a.reg.Get(claim.RobotID); !online {
+	// The target must be an online robot in the caller's fleet. Another fleet's
+	// robot, or a client that is not a robot, gets the same answer as an id
+	// that does not exist, so ids do not leak across fleets.
+	e, online := a.reg.Get(claim.RobotID)
+	if !online || e.Client.Kind != store.KindRobot || e.Client.FleetID != c.Client.FleetID {
 		c.Send(errMsg(protocol.ErrNotFound, "robot not online", env.ID))
 		return
 	}
