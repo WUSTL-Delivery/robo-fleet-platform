@@ -250,6 +250,9 @@ type Event struct {
 
 type LeaseClaim struct {
 	RobotID string `json:"robot_id"`
+	// Steal takes the robot from another operator who holds its lease. Without
+	// it a claim on a robot leased to someone else is refused with conflict.
+	Steal bool `json:"steal,omitempty"`
 }
 
 type Lease struct {
@@ -312,4 +315,7 @@ type ErrorMsg struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 	Ref     string `json:"ref,omitempty"`
+	// Lease is set only on the conflict that refuses a lease.claim: the lease
+	// that is in the way.
+	Lease *Lease `json:"lease,omitempty"`
 }

@@ -17,7 +17,11 @@
           ]
         },
         "message": { "type": "string", "maxLength": 512 },
-        "ref": { "type": "string", "maxLength": 64 }
+        "ref": { "type": "string", "maxLength": 64 },
+        "lease": {
+          "description": "Set only on the conflict that refuses a lease.claim: the lease that is in the way, as held at the moment of the refusal.",
+          "$ref": "defs.schema.json#/$defs/lease"
+        }
       },
       "required": ["code", "message"],
       "additionalProperties": false
