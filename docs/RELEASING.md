@@ -65,6 +65,7 @@ docker build -f server/Dockerfile -t fleet-server:dev --build-arg VERSION=dev .
 Configuration in the container is by environment variable (`FLEET_LISTEN`, `FLEET_DB`,
 `FLEET_HEARTBEAT_INTERVAL_MS`, `FLEET_LEASE_TTL_MS`, `FLEET_SWEEP_MS`,
 `FLEET_CLIENT_MSGS_PER_SEC`, `FLEET_CLIENT_MSGS_BURST`, `FLEET_ADMIN_TOKEN`,
-`FLEET_MAP_CENTER`, `FLEET_MAP_RADIUS_M`, `FLEET_MAP_LOCK`); a mounted
+`FLEET_MAP_CENTER`, `FLEET_MAP_RADIUS_M`, `FLEET_MAP_LOCK`, `FLEET_STUN_URLS`,
+`FLEET_TURN_URLS`, `FLEET_TURN_SECRET`, `FLEET_TURN_CREDENTIAL_TTL_S`); a mounted
 `-config` file also works. The image's `HEALTHCHECK` runs `fleet-server -healthcheck`,
 which hits `/healthz` on the configured listen port.
