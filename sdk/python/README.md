@@ -111,8 +111,8 @@ Things to know:
 
 `examples/fake_robot.py` pretends to be a robot so you can try a server by hand. It
 enrolls, shows up on the console map, wanders around a point while autonomous, drives
-under an operator's WASD, drains a battery, answers `jobs` channel messages, and can ask
-for help.
+under an operator's WASD, drains a battery, accepts and acks jobs sent to it on the
+`jobs` channel ([acked receive](#acked-receive)), and can ask for help.
 
 ```bash
 cd sdk/python/examples
@@ -152,6 +152,7 @@ jobs = robot.channel("jobs")
 jobs.on_message(lambda sender, data: print(sender, data))   # directed + broadcast
 await jobs.publish({"done": 17}, to=sender_id)   # directed; raises ChannelTargetNotFound if offline
 await jobs.publish({"status": "idle"})           # broadcast
+jobs.on_acked(lambda sender, data: queue.put_nowait(data))  # once per acked send; the SDK acks
 
 await robot.run_forever()                        # until close() or a terminal error
 await robot.close()
@@ -166,6 +167,7 @@ await robot.close()
 | `on_twist(handler)` | `handler(TwistCommand)`: `linear_x`, `linear_y`, `angular_z`, `source` (`operator`, `deadman`, `revoked`, `disconnected`), `lease_id`, `is_stop` |
 | `on_lease(handler)` | `handler(LeaseChange)`: `granted`, `lease_id`, `operator_id`, `reason` on revoke |
 | `channel(name).on_message(handler)` | `handler(sender, data)` for `channel.message`; `sender` is stamped by the server |
+| `channel(name).on_acked(handler)` | `handler(sender, data)` once per acked send, with the inner `data`; the SDK publishes `{"ack": seq}` back when it returns without raising, and again for every repeat. See [Acked receive](#acked-receive) |
 | `await channel(name).publish(data, to=None)` | `channel.publish`, directed or broadcast. A directed send waits 0.5 s for a `not_found` reply; silence is not a delivery receipt |
 | `robot.robot_id`, `.state`, `.mode`, `.lease` | this robot's id, connection state, `autonomous`/`help`/`teleop`, current lease |
 | `robot.client` | the underlying `FleetClient`, for message types `Robot` does not wrap |
@@ -176,6 +178,42 @@ use `FleetClient(url, kind="service", ...)` directly, with the same `channel()` 
 
 The module docstrings in `fleet/robot.py`, `fleet/channel.py` and `fleet/client.py` are
 the reference.
+
+## Acked receive
+
+A channel publish is at-most-once and gets no reply. When a sender needs to know its
+message was accepted, the two clients use the acked-send convention on the channel's
+data. The single reference for it is
+[`protocol/README.md`, "Acked send"](../../protocol/README.md#acked-send-convention-on-channel-data):
+the sender publishes `{"seq": n, "data": ...}` to one client and re-sends it until that
+client answers `{"ack": n}` on the same channel. This SDK implements the receiving half:
+
+```python
+jobs = robot.channel("jobs")
+
+def on_job(sender, data):        # data is the inner value; seq is not shown
+    work_queue.put_nowait(data)  # returning without an error accepts it
+
+jobs.on_acked(on_job)
+```
+
+- **Once per send.** The handler runs once per `(channel, sender, seq)` no matter how
+  many copies arrive. Every copy received after it was accepted is acked again.
+- **Returning accepts; raising refuses.** The ack is published when the handler returns
+  (or its coroutine finishes). If it raises, no ack is sent and the message is
+  forgotten, so the sender's next re-send runs the handler again. Copies that arrive
+  while an `async` handler is still running are dropped without an ack.
+- **Accepted is not finished.** Return well inside the sender's re-send interval (1 s by
+  default) and do long work afterwards; report its result as ordinary channel data.
+- **Memory.** Accepted messages are remembered for 10 minutes (`ACKED_MEMORY_SECONDS`),
+  in memory. A robot that restarts forgets them, and a re-send arriving after that is
+  handled a second time, so work that must not happen twice needs its own identity
+  inside `data`.
+- **Sharing a channel.** One acked handler per channel. Only data of exactly the shape
+  `{"seq": <integer 1..2^53-1>, "data": ...}` goes to it, and then not to `on_message`
+  handlers; everything else on the channel is ordinary data for `on_message`.
+
+Sending acked messages from Python is not implemented yet.
 
 ## How it stays online
 

@@ -1,5 +1,6 @@
 """A fake robot for trying a fleet-server by hand: it enrolls, shows up on the console map,
-wanders while autonomous, drives under an operator's WASD, and drains a battery.
+wanders while autonomous, drives under an operator's WASD, drains a battery, and
+accepts acked sends on the "jobs" channel (it prints each job and the SDK acks it).
 
 Run it with ./run_fake_robot.sh (loads examples/.env), or directly:
 
@@ -106,11 +107,13 @@ async def main() -> None:
 
     jobs = robot.channel("jobs")
 
-    async def on_job(sender: str, data: object) -> None:
+    def on_job(sender: str, data: object) -> None:
+        # An acked send: called once per job even when the sender re-sends it. Returning
+        # accepts the job, and the SDK then replies {"ack": seq} to the sender.
         print(f"  job from {sender}: {data}")
-        await jobs.publish({"ack": data}, to=sender)
 
-    jobs.on_message(on_job)
+    jobs.on_acked(on_job)
+    jobs.on_message(lambda sender, data: print(f"  message from {sender}: {data}"))  # plain data
 
     try:
         await robot.connect()

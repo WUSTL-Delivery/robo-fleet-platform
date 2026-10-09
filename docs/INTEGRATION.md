@@ -255,6 +255,7 @@ edge report rides here.
 - Delivery is **at-most-once by design**. If you need an acknowledgement, put a sequence
   number in `data` and have the receiver reply on the same channel. Make assignments
   idempotent on the robot side.
+- The exact shapes and rules for that acknowledgement are the acked-send convention in [`protocol/README.md`](../protocol/README.md#acked-send-convention-on-channel-data).
 - Payload cap is 64 KB per envelope; the per-client send queue is 64 messages and a client
   that cannot keep up is disconnected rather than allowed to stall the fleet.
 
