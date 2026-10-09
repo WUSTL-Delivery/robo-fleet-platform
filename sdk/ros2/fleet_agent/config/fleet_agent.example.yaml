@@ -1,0 +1,38 @@
+# Parameters for the fleet_agent node. Copy this file, edit it, and run:
+#   ros2 run fleet_agent fleet_agent --ros-args --params-file <your copy>
+#
+# Numbers declared as decimals must stay decimals (1.0, not 1): ROS 2 rejects an
+# integer for a double parameter.
+fleet_agent:
+  ros__parameters:
+    # fleet-server's WebSocket endpoint. A deployed server is wss://<host>/ws.
+    url: ws://localhost:8080/ws
+
+    # Display name in the console. Default: this machine's hostname.
+    name: delivery-01
+
+    # Where the robot's token is kept (JSON, mode 0600). Written on the first run;
+    # every later run reuses it, so the robot keeps its id. Delete it to enroll as
+    # a new robot. Default: ~/.fleet/<name>.json
+    token_file: ~/.fleet/delivery-01.json
+
+    # The fleet's enrollment key, read only while token_file is empty. Prefer the
+    # FLEET_ENROLL_KEY environment variable so the key never sits in a file.
+    # enroll_key: ""
+
+    # Manifest: the drive contract. Leave drive.type empty for a robot that cannot
+    # be driven; with "twist" both limits are required and must be > 0.
+    drive.type: twist
+    drive.max_v_mps: 1.5
+    drive.max_w_radps: 1.5
+
+    # Telemetry sources. Leave a topic empty if the robot does not have it.
+    # fix_topic (sensor_msgs/NavSatFix) becomes a geographic pose; a robot without
+    # GPS leaves it empty and is online without a pose.
+    telemetry.fix_topic: /gps/fix
+    # battery_topic (sensor_msgs/BatteryState) also declares a battery in the manifest.
+    telemetry.battery_topic: /battery_state
+    # Samples per second sent to the server.
+    telemetry.rate_hz: 1.0
+    # Stop reporting a pose this long after the last fix (0.0 = keep the last one forever).
+    telemetry.pose_timeout_s: 5.0
