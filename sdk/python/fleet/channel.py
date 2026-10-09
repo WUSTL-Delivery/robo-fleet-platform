@@ -5,15 +5,16 @@ waypoint list or an edge report rides on a channel. A :class:`Channel` is a
 thin view over one channel name on a :class:`~fleet.client.FleetClient`, so any
 kind of client (robot, service, operator) can use it::
 
-    assignment = client.channel("assignment")
+    status = client.channel("status")
 
-    async def on_assignment(sender: str, data):   # sender is stamped by the server
-        await assignment.publish({"ack": data["seq"]}, to=sender)
+    def on_status(sender: str, data):              # sender is stamped by the server
+        print(sender, data)
 
-    assignment.on_message(on_assignment)           # directed + broadcast messages
-    await assignment.publish(report)               # to=None: broadcast (sender excluded)
-    await assignment.publish(job, to=robot_id)     # directed; raises ChannelTargetNotFound
+    status.on_message(on_status)                   # directed + broadcast messages
+    await status.publish(report)                   # to=None: broadcast (sender excluded)
+    await status.publish(note, to=robot_id)        # directed; raises ChannelTargetNotFound
                                                    # if that client is not connected
+    client.channel("jobs").on_acked(on_job)        # acked receive, see below
 
 Receiving. Directed messages reach a client whether or not it subscribed, and
 so do broadcasts to a robot whose manifest lists the channel. Everyone else
@@ -36,27 +37,64 @@ sends with an id and then waits up to ``wait`` seconds (default
 - any other error with that ref (e.g. ``invalid_message``, payload too large):
   raises :class:`~fleet.client.FleetClientError` with the server's code.
 - nothing within the window: returns the sent envelope. That is NOT a delivery
-  receipt; the target can still drop off right after. If you need one, put a
-  sequence number in ``data`` and have the receiver reply on the channel.
+  receipt; the target can still drop off right after. If you need one, the
+  sender uses an acked send and the receiver ``on_acked`` (below).
 
 The error normally arrives within one round trip, so the window only costs
 time on success. Pass ``wait=0`` for fire-and-forget (high-rate publishes).
 Broadcasts default to ``wait=0``: they have no target that can be missing.
 
-Acked sends (a request that waits for the receiver's reply on the channel) are
-not part of v0. They can be added on top of this API without changing it:
-``publish`` already takes an ``id`` and returns the envelope, and handlers get
-the server-stamped sender to reply to.
+Acked receive. The acked-send convention (protocol/README.md, "Acked send
+(convention on channel data)", the single reference) lets a sender learn that
+a directed message was accepted: it publishes ``{"seq": n, "data": ...}`` and
+re-sends until the receiver answers ``{"ack": n}`` on the same channel. This
+module implements the receiving half::
+
+    def on_job(sender: str, data):       # data is the inner value; seq is not shown
+        queue.put_nowait(data)           # returning without error accepts it
+
+    jobs.on_acked(on_job)
+
+For each ``(channel, sender, seq)``:
+
+- first copy: the handler runs. When it returns (or its coroutine finishes)
+  without raising, the SDK publishes ``{"ack": seq}`` to the sender. If it
+  raises, nothing is sent and the key is forgotten, so the sender's next
+  re-send runs the handler again;
+- a repeat while the handler is still running: dropped, no ack yet;
+- a repeat after it was accepted: the handler is not called again, and the ack
+  is published again, once per copy received.
+
+An ack means accepted, not finished: return well inside the sender's re-send
+interval (1 s by default) and do long work afterwards, reporting its result as
+ordinary channel data. An ack that cannot be sent (link down, or the sender
+gone) is dropped; the sender's next re-send is answered.
+
+Accepted keys are remembered for :data:`ACKED_MEMORY_SECONDS` (10 minutes)
+after they were first received, in memory only. So a message is handled exactly
+once within one process lifetime; a receiver that restarts forgets, and a
+re-send arriving after that is handled again. Data whose effect must not happen
+twice needs its own identity inside the inner ``data``.
+
+Only data of exactly the acked-message shape (an object with just ``seq`` and
+``data``, ``seq`` an integer in 1..:data:`MAX_SEQ`) goes to the acked handler,
+and only on a channel that has one. Such a message is then not shown to
+``on_message`` handlers. Everything else on the channel, including ``{"ack":
+n}`` replies, is ordinary data for ``on_message``. Acked messages are directed,
+and directed messages need no subscription, so ``on_acked`` does not subscribe.
+The sending half is not in this SDK yet.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
+import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Union
 
 from .client import ConnectionState, Envelope, FleetClientError, StateChange
@@ -65,12 +103,14 @@ if TYPE_CHECKING:
     from .client import FleetClient
 
 __all__ = [
+    "ACKED_MEMORY_SECONDS",
     "CHANNEL_NAME_PATTERN",
     "DEFAULT_NOT_FOUND_WINDOW",
     "Channel",
     "ChannelHandler",
     "ChannelMessage",
     "ChannelTargetNotFound",
+    "MAX_SEQ",
     "channel",
 ]
 
@@ -81,6 +121,13 @@ CHANNEL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 
 #: Seconds a directed publish waits for a ``not_found`` reply before returning.
 DEFAULT_NOT_FOUND_WINDOW = 0.5
+
+#: Seconds an accepted acked message is remembered after it was first received
+#: (protocol/README.md, Acked send, Receiver: at least 10 minutes).
+ACKED_MEMORY_SECONDS = 600.0
+
+#: Largest valid acked-send ``seq`` (2^53 - 1); the smallest is 1.
+MAX_SEQ = 2**53 - 1
 
 #: ``handler(sender, data)``; a coroutine function is scheduled as its own task.
 ChannelHandler = Callable[[str, Any], Union[None, Awaitable[None]]]
@@ -104,6 +151,35 @@ class ChannelMessage:
     sender: str
     data: Any
     ts_ms: int | None = None
+
+
+@dataclass
+class _Seen:
+    """One seen-set entry: in progress until the handler accepts, then done."""
+
+    first: float
+    done: bool = field(default=False)
+
+
+def _acked_seq(data: Any) -> int | None:
+    """The seq if ``data`` is exactly an acked message ``{seq, data}``, else None."""
+    if not isinstance(data, dict) or len(data) != 2 or "seq" not in data or "data" not in data:
+        return None
+    return _valid_seq(data["seq"])
+
+
+def _ack_seq(data: Any) -> int | None:
+    """The seq if ``data`` is exactly an ack ``{ack}``, else None."""
+    if not isinstance(data, dict) or len(data) != 1 or "ack" not in data:
+        return None
+    return _valid_seq(data["ack"])
+
+
+def _valid_seq(seq: Any) -> int | None:
+    # bool is an int in Python but true/false are not JSON integers.
+    if isinstance(seq, int) and not isinstance(seq, bool) and 1 <= seq <= MAX_SEQ:
+        return seq
+    return None
 
 
 def channel(client: FleetClient, name: str) -> Channel:
@@ -137,6 +213,21 @@ class Channel:
         reconnects while any handler is registered. Returns a function that
         removes the handler."""
         return self._hub.add_handler(self.name, handler)
+
+    def on_acked(self, handler: ChannelHandler) -> Callable[[], None]:
+        """Receives acked sends on this channel: calls ``handler(sender, data)``
+        with the inner ``data`` once per ``(sender, seq)``, and publishes
+        ``{"ack": seq}`` back to the sender when the handler returns (or its
+        coroutine finishes) without raising, and again for every later repeat.
+        A handler that raises is logged, sends no ack, and sees the sender's
+        next re-send as new. See the module docs. Returns a function that
+        removes the handler.
+
+        Raises:
+            ValueError: this channel already has an acked handler. There is one
+                per channel because one handler's outcome decides the ack.
+        """
+        return self._hub.set_acked_handler(self.name, handler)
 
     async def publish(
         self,
@@ -207,6 +298,11 @@ class _ChannelHub:
     def __init__(self, client: FleetClient) -> None:
         self._client = client
         self._handlers: dict[str, list[ChannelHandler]] = {}
+        self._acked_handlers: dict[str, ChannelHandler] = {}
+        # Seen set of the acked-send receiver, keyed (channel, from, seq). Dicts keep
+        # insertion order, which is first-received order, so expiry scans from the front.
+        self._seen: dict[tuple[str, str, int], _Seen] = {}
+        self._now: Callable[[], float] = time.monotonic
         self._pending_errors: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._snapshot_waiters: list[asyncio.Future[dict[str, Any]]] = []
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -275,12 +371,92 @@ class _ChannelHub:
     def _on_channel_message(self, env: Envelope) -> None:
         p = env["payload"]
         name = p.get("channel")
-        handlers = self._handlers.get(name) if isinstance(name, str) else None
+        if not isinstance(name, str):
+            return
+        sender = str(p.get("from", ""))
+        data = p.get("data")
+        acked = self._acked_handlers.get(name)
+        if acked is not None and sender:
+            seq = _acked_seq(data)
+            if seq is not None:
+                self._receive_acked(name, sender, seq, data["data"], acked)
+                return
+        handlers = self._handlers.get(name)
         if not handlers:
             return
-        msg = ChannelMessage(channel=name, sender=str(p.get("from", "")), data=p.get("data"), ts_ms=env.get("ts_ms"))
+        msg = ChannelMessage(channel=name, sender=sender, data=data, ts_ms=env.get("ts_ms"))
         for h in list(handlers):
             self._client._call(_bind(h), msg)
+
+    # -- acked receive (protocol/README.md, Acked send, Receiver)
+
+    def set_acked_handler(self, name: str, handler: ChannelHandler) -> Callable[[], None]:
+        if name in self._acked_handlers:
+            raise ValueError(f"channel {name!r} already has an acked handler")
+        self._acked_handlers[name] = handler
+
+        def remove() -> None:
+            if self._acked_handlers.get(name) is handler:
+                del self._acked_handlers[name]
+
+        return remove
+
+    def _receive_acked(self, name: str, sender: str, seq: int, inner: Any, handler: ChannelHandler) -> None:
+        now = self._now()
+        self._forget_old(now)
+        key = (name, sender, seq)
+        entry = self._seen.get(key)
+        if entry is not None:
+            if entry.done:  # accepted earlier: never redeliver, ack every copy
+                self._client._call(lambda _: self._send_ack(name, sender, seq), None)
+            return  # in progress: drop the repeat, no ack yet
+        entry = self._seen[key] = _Seen(first=now)
+        try:
+            result = handler(sender, inner)
+        except Exception:
+            log.exception("acked handler for channel %r raised; seq %d from %s not acked", name, seq, sender)
+            self._forget(key, entry)
+            return
+        if inspect.isawaitable(result):
+            self._client._call(lambda _: self._finish_acked(key, entry, result), None)
+        else:
+            entry.done = True
+            self._client._call(lambda _: self._send_ack(name, sender, seq), None)
+
+    async def _finish_acked(self, key: tuple[str, str, int], entry: _Seen, result: Awaitable[None]) -> None:
+        name, sender, seq = key
+        try:
+            await result
+        except asyncio.CancelledError:
+            self._forget(key, entry)
+            raise
+        except Exception:
+            log.exception("acked handler for channel %r raised; seq %d from %s not acked", name, seq, sender)
+            self._forget(key, entry)
+            return
+        entry.done = True
+        await self._send_ack(name, sender, seq)
+
+    async def _send_ack(self, name: str, sender: str, seq: int) -> None:
+        # Once per received copy, never retried: a lost ack is answered on the next re-send.
+        try:
+            await self._client.send("channel.publish", {"channel": name, "to": sender, "data": {"ack": seq}})
+        except FleetClientError as e:
+            log.debug("ack %d to %s on channel %r not sent: %s", seq, sender, name, e)
+
+    def _forget(self, key: tuple[str, str, int], entry: _Seen) -> None:
+        if self._seen.get(key) is entry:
+            del self._seen[key]
+
+    def _forget_old(self, now: float) -> None:
+        expired = []
+        for key, entry in self._seen.items():
+            if now - entry.first <= ACKED_MEMORY_SECONDS:
+                break
+            if entry.done:  # an in-progress key stays until its handler settles
+                expired.append(key)
+        for key in expired:
+            del self._seen[key]
 
     # -- error replies by ref
 
