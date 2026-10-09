@@ -2,8 +2,8 @@
 // and telemetry once, feeds every snapshot and event into fleetReducer, and
 // hands the resulting FleetState to the view.
 import { useEffect, useReducer, useRef } from "react";
-import type { FleetClient, FleetEvent } from "@fleet-platform/sdk";
-import { emptyFleet, fleetReducer, type FleetState } from "./model";
+import type { FleetClient } from "@fleet-platform/sdk";
+import { emptyFleet, fleetReducer, needsResync, type FleetState } from "./model";
 
 const TOPICS = ["presence", "events", "telemetry"] as const;
 /** Coalesces a burst of robots coming online into one snapshot request. */
@@ -21,11 +21,10 @@ export function useFleet(client: FleetClient): FleetState {
     dispatch({ kind: "reset" });
     if (client.snapshot) dispatch({ kind: "snapshot", snapshot: client.snapshot });
 
-    // Events carry no name or manifest. When a robot we have not seen appears,
-    // or one comes back online (it re-sends its manifest on connect), ask for
-    // a fresh snapshot: re-subscribing to the same topics answers with one.
+    // When a robot we have not seen appears, or one comes back online, ask for
+    // a fresh snapshot (see needsResync): re-subscribing to the same topics
+    // answers with one.
     let resync: ReturnType<typeof setTimeout> | undefined;
-    const needsResync = (e: FleetEvent) => e.event === "robot.online" || !known.current.has(e.robot_id);
     const scheduleResync = () => {
       if (resync !== undefined) return;
       resync = setTimeout(() => {
@@ -36,7 +35,7 @@ export function useFleet(client: FleetClient): FleetState {
 
     const offSnapshot = client.onSnapshot((snapshot) => dispatch({ kind: "snapshot", snapshot }));
     const offEvent = client.onEvent((event) => {
-      if (needsResync(event)) scheduleResync();
+      if (needsResync(event, known.current)) scheduleResync();
       dispatch({ kind: "event", event, atMs: Date.now() });
     });
     // Topics are remembered by the client and re-sent on reconnect; subscribing

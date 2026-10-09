@@ -14,15 +14,22 @@
 //     or the fleet state shows someone else holding it), stop sending and fall
 //     back to read-only.
 //
+// Watching another operator drive is read-only by construction, not by a
+// disabled button: without a lease of its own this hook has no transport open
+// and no key handler bound (both exist only in the "driving" phase), so there
+// is nothing a spectator's console could send. Taking over from the driver is
+// one explicit message, lease.claim with `steal`, and the server decides it.
+//
 // Which wire a twist rides (the direct WebRTC data channel, or the server bus
 // as the fallback) is twistTransport.ts's business: one transport is opened
 // per lease and closed when the lease ends. This hook only hands it setpoints.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FleetClient, Lease } from "@fleet-platform/sdk";
 import type { RobotView } from "../fleet/model";
+import { claimRefusedNotice, revokedNotice, withTaker, type TeleopNotice, type TeleopPhase } from "./control";
 import { BUS_ONLY, openTwistTransport, type TwistLinkStatus, type TwistSetpoint, type TwistTransport } from "./twistTransport";
 
-export type TeleopPhase = "idle" | "claiming" | "driving";
+export type { TeleopPhase } from "./control";
 
 export type DriveKey = "forward" | "back" | "left" | "right";
 
@@ -35,6 +42,8 @@ export interface Teleop {
   phase: TeleopPhase;
   /** The lease this console holds, while driving. */
   lease: Lease | undefined;
+  /** The lease this console last held and no longer does (handed back, revoked, lost). */
+  endedLeaseId: string | undefined;
   /** Keys held right now (for the on-screen pad). */
   held: ReadonlySet<DriveKey>;
   /** The setpoint being sent right now (zero when no key is held). */
@@ -45,8 +54,12 @@ export interface Teleop {
   speed: number;
   setSpeed: (s: number) => void;
   /** Why the last attempt failed or control was lost; cleared on the next take over. */
-  notice: string | undefined;
-  takeOver: () => void;
+  notice: TeleopNotice | undefined;
+  /**
+   * Claims the robot. A plain claim never takes it from another operator (the
+   * server refuses with who holds it); `steal` does, revoking their lease.
+   */
+  takeOver: (opts?: { steal?: boolean }) => void;
   release: () => void;
 }
 
@@ -67,12 +80,7 @@ const KEYS: Record<string, DriveKey> = {
   ArrowRight: "right",
 };
 
-const REVOKE_NOTICE: Record<string, string> = {
-  stolen: "Another operator took control. You are now watching read-only.",
-  expired: "The lease expired. The robot is back in the help queue.",
-  operator_lost: "The server lost this console's connection and revoked the lease.",
-  released: "Control handed back.",
-};
+const say = (text: string): TeleopNotice => ({ kind: "text", text });
 
 /** Keys to a body-frame twist, clamped to the manifest's limits. */
 export function twistFor(held: ReadonlySet<DriveKey>, speed: number, maxV: number, maxW: number): TwistCommand {
@@ -111,9 +119,10 @@ export function useTeleop(client: FleetClient, robot: RobotView, operatorId: str
 
   const [phase, setPhaseState] = useState<TeleopPhase>("idle");
   const [lease, setLeaseState] = useState<Lease | undefined>();
+  const [endedLeaseId, setEndedLeaseId] = useState<string | undefined>();
   const [held, setHeld] = useState<ReadonlySet<DriveKey>>(new Set());
   const [speed, setSpeedState] = useState(DEFAULT_SPEED);
-  const [notice, setNotice] = useState<string | undefined>();
+  const [notice, setNotice] = useState<TeleopNotice | undefined>();
   const [link, setLink] = useState<TwistLinkStatus>(BUS_ONLY);
 
   // Timers and socket handlers read these, not the render-time values.
@@ -150,6 +159,7 @@ export function useTeleop(client: FleetClient, robot: RobotView, operatorId: str
    */
   const setLease = useCallback(
     (l: Lease | undefined) => {
+      if (!l && leaseRef.current) setEndedLeaseId(leaseRef.current.lease_id);
       leaseRef.current = l;
       seenInFleetRef.current = false;
       setLeaseState(l);
@@ -194,7 +204,7 @@ export function useTeleop(client: FleetClient, robot: RobotView, operatorId: str
 
   /** Control is gone (revoked, refused, or seen held by someone else). */
   const drop = useCallback(
-    (why: string | undefined) => {
+    (why: TeleopNotice | undefined) => {
       heldRef.current = new Set();
       setHeld(new Set());
       pendingRef.current = {};
@@ -225,18 +235,20 @@ export function useTeleop(client: FleetClient, robot: RobotView, operatorId: str
     });
     const offRevoked = client.on("lease.revoked", ({ payload }) => {
       if (payload.lease_id !== leaseRef.current?.lease_id) return;
-      drop(REVOKE_NOTICE[payload.reason]);
+      drop(revokedNotice(payload.reason));
     });
     const offError = client.on("error", ({ payload }) => {
       const ref = payload.ref;
       if (!ref || !ref.startsWith("teleop.")) return;
       if (ref === pendingRef.current.claim) {
-        drop(`Take over refused: ${payload.message}.`);
+        // A conflict is another operator holding the robot: nothing changed,
+        // and the notice names them from the lease the error carries.
+        drop(claimRefusedNotice(payload));
       } else if (ref === pendingRef.current.release) {
         // The lease was already gone; either way we no longer hold it.
         drop(undefined);
       } else if (leaseRef.current && (ref.startsWith("teleop.twist.") || ref.startsWith("teleop.renew."))) {
-        drop(`Control lost: ${payload.message}.`);
+        drop(say(`Control lost: ${payload.message}.`));
       }
     });
     return () => {
@@ -257,9 +269,15 @@ export function useTeleop(client: FleetClient, robot: RobotView, operatorId: str
       seenInFleetRef.current = true;
       return;
     }
-    if (fleetLeaseId !== undefined) drop(REVOKE_NOTICE.stolen);
-    else if (seenInFleetRef.current) drop("Control lost: the robot is no longer leased to this console.");
+    if (fleetLeaseId !== undefined) drop({ kind: "stolen" });
+    else if (seenInFleetRef.current) drop(say("Control lost: the robot is no longer leased to this console."));
   }, [fleetLeaseId, drop]);
+
+  // lease.revoked does not say who stole the lease; the robot's next lease does.
+  const fleetLease = robot.lease;
+  useEffect(() => {
+    setNotice((n) => withTaker(n, fleetLease, operatorId));
+  }, [fleetLease, operatorId, notice]);
 
   // A robot going offline cannot be driven; stop sending.
   useEffect(() => {
@@ -270,7 +288,7 @@ export function useTeleop(client: FleetClient, robot: RobotView, operatorId: str
   useEffect(() => {
     if (phase !== "claiming") return;
     const t = setTimeout(() => {
-      if (phaseRef.current === "claiming") drop("Take over timed out: no answer from the server.");
+      if (phaseRef.current === "claiming") drop(say("Take over timed out: no answer from the server."));
     }, CLAIM_TIMEOUT_MS);
     return () => clearTimeout(t);
   }, [phase, drop]);
@@ -338,14 +356,18 @@ export function useTeleop(client: FleetClient, robot: RobotView, operatorId: str
     [trySend],
   );
 
-  const takeOver = useCallback(() => {
-    if (phaseRef.current === "claiming" || phaseRef.current === "driving") return;
-    setNotice(undefined);
-    const id = nextId("claim");
-    pendingRef.current.claim = id;
-    setPhase("claiming");
-    if (!trySend("lease.claim", { robot_id: robotId }, { id })) drop("Not connected.");
-  }, [robotId, setPhase, trySend, drop]);
+  const takeOver = useCallback(
+    (opts?: { steal?: boolean }) => {
+      if (phaseRef.current === "claiming" || phaseRef.current === "driving") return;
+      setNotice(undefined);
+      const id = nextId("claim");
+      pendingRef.current.claim = id;
+      setPhase("claiming");
+      const payload = opts?.steal === true ? { robot_id: robotId, steal: true } : { robot_id: robotId };
+      if (!trySend("lease.claim", payload, { id })) drop(say("Not connected."));
+    },
+    [robotId, setPhase, trySend, drop],
+  );
 
   const release = useCallback(() => {
     const l = leaseRef.current;
@@ -358,7 +380,7 @@ export function useTeleop(client: FleetClient, robot: RobotView, operatorId: str
     // The server answers a release with the robot.lease_released event, not a
     // direct reply; our lease is over the moment we ask.
     if (!trySend("lease.release", { lease_id: l.lease_id, resolution: "resolved" }, { id })) {
-      drop("Not connected; the lease will expire on the server.");
+      drop(say("Not connected; the lease will expire on the server."));
       return;
     }
     setLease(undefined);
@@ -375,6 +397,7 @@ export function useTeleop(client: FleetClient, robot: RobotView, operatorId: str
   return {
     phase,
     lease,
+    endedLeaseId,
     held,
     command: phase === "driving" ? twistFor(held, speed, maxV, maxW) : { vx: 0, wz: 0 },
     link,

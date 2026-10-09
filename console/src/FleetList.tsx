@@ -1,7 +1,9 @@
-// Every robot the fleet knows, online or not, with its FSM state. Selecting a
-// row selects the robot for the detail panel (and highlights its marker).
+// Every robot the fleet knows, online or not, with its FSM state and who is
+// driving or watching it. Selecting a row selects the robot for the detail
+// panel (and highlights its marker).
 import type { RobotState } from "@fleet-platform/sdk";
 import { displayName, type RobotView } from "./fleet/model";
+import { audienceOf, audienceSummary, type Audience } from "./fleet/presence";
 
 const STATE_LABEL: Record<RobotState, string> = {
   AUTONOMOUS: "Autonomous",
@@ -11,12 +13,13 @@ const STATE_LABEL: Record<RobotState, string> = {
 
 interface Props {
   robots: RobotView[];
+  audiences: ReadonlyMap<string, Audience>;
   synced: boolean;
   selectedId: string | null;
   onSelect: (robotId: string) => void;
 }
 
-export function FleetList({ robots, synced, selectedId, onSelect }: Props) {
+export function FleetList({ robots, audiences, synced, selectedId, onSelect }: Props) {
   const online = robots.filter((r) => r.presence === "online").length;
   return (
     <section className="fleet-list" aria-label="Robots">
@@ -31,23 +34,34 @@ export function FleetList({ robots, synced, selectedId, onSelect }: Props) {
         <p className="hint pad">No robots have enrolled in this fleet yet.</p>
       )}
       <ul>
-        {robots.map((r) => (
-          <li key={r.robot_id}>
-            <button
-              className="robot-row"
-              data-robot-id={r.robot_id}
-              data-presence={r.presence}
-              data-state={r.state}
-              aria-pressed={r.robot_id === selectedId}
-              onClick={() => onSelect(r.robot_id)}
-            >
-              <span className={`dot ${r.presence === "online" ? "connected" : "offline"}`} aria-hidden />
-              <span className="name">{displayName(r)}</span>
-              <span className="presence">{r.presence}</span>
-              <span className={`badge state-${r.state.toLowerCase()}`}>{STATE_LABEL[r.state]}</span>
-            </button>
-          </li>
-        ))}
+        {robots.map((r) => {
+          const people = audienceSummary(audienceOf(audiences, r.robot_id));
+          return (
+            <li key={r.robot_id}>
+              <button
+                className="robot-row"
+                data-robot-id={r.robot_id}
+                data-presence={r.presence}
+                data-state={r.state}
+                aria-pressed={r.robot_id === selectedId}
+                onClick={() => onSelect(r.robot_id)}
+              >
+                <span className={`dot ${r.presence === "online" ? "connected" : "offline"}`} aria-hidden />
+                <span className="name">{displayName(r)}</span>
+                <span className="presence">
+                  {r.presence}
+                  {people && (
+                    <span className="people" data-testid="robot-people">
+                      {" · "}
+                      {people}
+                    </span>
+                  )}
+                </span>
+                <span className={`badge state-${r.state.toLowerCase()}`}>{STATE_LABEL[r.state]}</span>
+              </button>
+            </li>
+          );
+        })}
       </ul>
     </section>
   );
