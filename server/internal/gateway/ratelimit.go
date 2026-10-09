@@ -26,6 +26,9 @@ func (r RateLimit) enabled() bool { return r.PerSec > 0 && r.Burst > 0 }
 var rateLimitedTypes = map[string]bool{
 	protocol.TypeTelemetry:      true,
 	protocol.TypeChannelPublish: true,
+	// A console sends watch on every selection change, so a held arrow key
+	// can flood it.
+	protocol.TypeWatch: true,
 }
 
 // throttleNoticeEvery bounds the error replies a throttled client gets. One

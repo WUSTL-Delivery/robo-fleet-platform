@@ -65,7 +65,9 @@ func (c *client) nextOperatorEvent(name, operatorID string) protocol.OperatorSum
 	}
 	var sum protocol.OperatorSummary
 	mustUnmarshal(c.t, ev.Data, &sum)
-	if sum.OperatorID != operatorID || sum.Online != (name == protocol.EventOperatorOnline) {
+	// Only operator.offline carries an offline entry, and an offline operator
+	// watches nothing.
+	if sum.OperatorID != operatorID || sum.Online != (name != protocol.EventOperatorOffline) || (!sum.Online && sum.Watching != "") {
 		c.t.Fatalf("%s data for %s: %+v", name, operatorID, sum)
 	}
 	return sum
@@ -124,10 +126,30 @@ func onlyOperators(t *testing.T, snap protocol.Snapshot, want map[string]bool) {
 	}
 }
 
+// onlyWatching asserts who the snapshot says is watching what (operator id →
+// robot id); every operator not named must be watching nothing.
+func onlyWatching(t *testing.T, snap protocol.Snapshot, want map[string]string) {
+	t.Helper()
+	got := map[string]string{}
+	for _, o := range snap.Operators {
+		if o.Watching != "" {
+			got[o.OperatorID] = o.Watching
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("snapshot watching %v, want %v", got, want)
+	}
+	for id, robot := range want {
+		if got[id] != robot {
+			t.Fatalf("snapshot watching %v, want %v", got, want)
+		}
+	}
+}
+
 // TestIntegrationTwoFleetIsolation runs two unrelated fleets on one server and
 // shows that nothing crosses between them: snapshots (robots and operators),
 // robot and operator presence, telemetry,
-// help and lease events, lease claim/renew/release, twist, signaling, channel
+// help and lease events, lease claim/renew/release, watch, twist, signaling, channel
 // messages, layers and their retained replay, and the admin API's client
 // revoke. Every cross-fleet id is answered exactly like an id that does not
 // exist, so ids do not leak across tenants.
@@ -267,6 +289,42 @@ func TestIntegrationTwoFleetIsolation(t *testing.T) {
 	svcB.quiet()
 	opB.quiet()
 
+	// --- watch across fleets: not_found, exactly like an unknown robot ---
+	watch := func(id string) protocol.Watch { return protocol.Watch{RobotID: &id} }
+	opA.send(protocol.TypeWatch, watch(ghost))
+	unknownWatch := opA.nextError()
+	if unknownWatch.Code != protocol.ErrNotFound {
+		t.Fatalf("watch of an unknown robot: %+v", unknownWatch)
+	}
+	// Fleet B's robot, and ids that are not robots in either fleet.
+	for _, id := range []string{robotBID, svcBID, opBID, svcAID, opAID} {
+		opA.send(protocol.TypeWatch, watch(id))
+		if got := opA.nextError(); got != unknownWatch {
+			t.Fatalf("watch of %s: %+v differs from an unknown robot %+v", id, got, unknownWatch)
+		}
+	}
+	// Nothing was recorded and nobody in either fleet was told.
+	onlyWatching(t, opA.quiet(), nil)
+	onlyWatching(t, opB.quiet(), nil)
+	robotB.quiet()
+
+	// Each fleet's operator watches its own robot: only that fleet hears it,
+	// and only that fleet's snapshot shows it.
+	opA.send(protocol.TypeWatch, watch(robotAID))
+	if sum := opA.nextOperatorEvent(protocol.EventOperatorWatching, opAID); sum.Watching != robotAID {
+		t.Fatalf("fleet A operator.watching: %+v", sum)
+	}
+	onlyWatching(t, opA.quiet(), map[string]string{opAID: robotAID})
+	onlyWatching(t, opB.quiet(), nil)
+	opB.send(protocol.TypeWatch, watch(robotBID))
+	if sum := opB.nextOperatorEvent(protocol.EventOperatorWatching, opBID); sum.Watching != robotBID {
+		t.Fatalf("fleet B operator.watching: %+v", sum)
+	}
+	onlyWatching(t, opB.quiet(), map[string]string{opBID: robotBID})
+	onlyWatching(t, opA.quiet(), map[string]string{opAID: robotAID})
+	robotA.quiet() // a robot is not told who is looking at it
+	robotB.quiet()
+
 	// --- fleet B's own operator takes the lease; fleet A sees none of it ---
 	opB.send(protocol.TypeLeaseClaim, protocol.LeaseClaim{RobotID: robotBID})
 	var leaseB protocol.Lease
@@ -405,6 +463,7 @@ func TestIntegrationTwoFleetIsolation(t *testing.T) {
 	mustUnmarshal(t, lateA.nextOf(protocol.TypeSnapshot).Payload, &snap)
 	onlyRobot(t, snap, robotAID)
 	onlyOperators(t, snap, map[string]bool{opAID: true, lateAID: true})
+	onlyWatching(t, snap, map[string]string{opAID: robotAID})
 	expectLayer(lateA, "Fleet A layer", `{"fleet":"a"}`)
 	lateA.quiet()
 	// Operator presence: fleet A hears its own operator arrive, fleet B does not.
@@ -420,6 +479,7 @@ func TestIntegrationTwoFleetIsolation(t *testing.T) {
 		t.Fatalf("late fleet B snapshot: %+v", sum)
 	}
 	onlyOperators(t, snap, map[string]bool{opBID: true, lateBID: true})
+	onlyWatching(t, snap, map[string]string{opBID: robotBID})
 	expectLayer(lateB, "Fleet B layer", `{"fleet":"b"}`)
 	lateB.quiet()
 	opB.nextOperatorEvent(protocol.EventOperatorOnline, lateBID)
@@ -474,13 +534,17 @@ func TestIntegrationTwoFleetIsolation(t *testing.T) {
 	}
 	lateB.nextEvent(protocol.EventRobotLeaseRevoked, robotBID)
 	lateB.nextOperatorEvent(protocol.EventOperatorOffline, opBID)
-	onlyOperators(t, lateB.quiet(), map[string]bool{opBID: false, lateBID: true})
+	snap = lateB.quiet()
+	onlyOperators(t, snap, map[string]bool{opBID: false, lateBID: true})
+	onlyWatching(t, snap, nil) // going offline cleared it
 	robotB.ws.Close(websocket.StatusNormalClosure, "gone")
 	lateB.nextEvent(protocol.EventRobotOffline, robotBID)
 	lateB.quiet()
 
 	// Fleet A heard none of it, and its own flow still works end to end.
-	onlyOperators(t, opA.quiet(), map[string]bool{opAID: true, lateAID: true})
+	snap = opA.quiet()
+	onlyOperators(t, snap, map[string]bool{opAID: true, lateAID: true})
+	onlyWatching(t, snap, map[string]string{opAID: robotAID})
 	lateA.quiet()
 	svcA.quiet()
 	if sum := onlyRobot(t, robotA.quiet(), robotAID); sum.State != protocol.StateAutonomous || sum.Lease != nil {
