@@ -6,7 +6,8 @@ import "fleetplatform/sdk/go/protocol"
 const (
 	// CodeNetwork: the socket could not be opened or was lost. Retried.
 	CodeNetwork = "network"
-	// CodeTimeout: no enroll.response / welcome within Config.HandshakeTimeout. Retried.
+	// CodeTimeout: no enroll.response / welcome within Config.HandshakeTimeout
+	// (retried), or no ack within a Channel.SendAcked deadline.
 	CodeTimeout = "timeout"
 	// CodeClosed: the client is closed, or not open right now (Send).
 	CodeClosed = "closed"

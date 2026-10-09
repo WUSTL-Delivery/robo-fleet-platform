@@ -553,3 +553,51 @@ func TestSubscribeArgumentsAndClose(t *testing.T) {
 		t.Fatalf("Subscribe after Close = %v, want ErrClosed", err)
 	}
 }
+
+// Operator presence, typed: who is at a console arrives as the operator's
+// entry, online and then offline, and the snapshot lists the same entry.
+func TestOperatorPresenceCallbacks(t *testing.T) {
+	srv := fleettest.Start(t)
+	brain := mustConnect(t, fleet.Config{URL: srv.WSURL, Kind: fleet.Service, EnrollKey: srv.EnrollKey})
+	seen := make(chan fleet.OperatorSummary, 8)
+	brain.OnOperatorPresence(func(op fleet.OperatorSummary) { seen <- op })
+	var names []string
+	brain.OnEvent(func(ev fleet.Event) { names = append(names, ev.Event+" "+ev.OperatorID+ev.RobotID) })
+	if snap := subscribe(t, brain, fleet.TopicPresence); len(snap.Operators) != 0 {
+		t.Fatalf("operators before anyone enrolled: %+v", snap.Operators)
+	}
+
+	next := func(what string) fleet.OperatorSummary {
+		t.Helper()
+		select {
+		case op := <-seen:
+			return op
+		case <-time.After(10 * time.Second):
+			t.Fatalf("no operator presence callback for %s", what)
+			return fleet.OperatorSummary{}
+		}
+	}
+
+	operator := mustConnect(t, fleet.Config{URL: srv.WSURL, Kind: fleet.Operator, Name: "ada", EnrollKey: srv.OperatorInvite(t)})
+	want := fleet.OperatorSummary{OperatorID: operator.ClientID(), Name: "ada", Online: true}
+	if op := next("operator.online"); op != want {
+		t.Fatalf("online: got %+v, want %+v", op, want)
+	}
+	if snap := subscribe(t, brain, fleet.TopicPresence); len(snap.Operators) != 1 || snap.Operators[0] != want {
+		t.Fatalf("snapshot operators: %+v, want [%+v]", snap.Operators, want)
+	}
+
+	operator.Close()
+	want.Online = false
+	if op := next("operator.offline"); op != want {
+		t.Fatalf("offline: got %+v, want %+v", op, want)
+	}
+	// Handlers run one at a time, so a handler is a safe place to read names.
+	done := make(chan []string, 1)
+	brain.OnSnapshot(func(fleet.Snapshot) { done <- slices.Clone(names) })
+	subscribe(t, brain, fleet.TopicPresence)
+	id := operator.ClientID()
+	if got := <-done; !slices.Equal(got, []string{"operator.online " + id, "operator.offline " + id}) {
+		t.Fatalf("OnEvent saw %q", got)
+	}
+}
