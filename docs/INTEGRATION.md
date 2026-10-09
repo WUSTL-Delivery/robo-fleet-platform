@@ -225,7 +225,7 @@ Topics:
 
 | Topic | You receive |
 |---|---|
-| `presence` | `event{robot.online}`, `event{robot.offline}` |
+| `presence` | `event{robot.online}`, `event{robot.offline}`; `event{operator.online}`, `event{operator.offline}` (these carry `operator_id`, not `robot_id`; see `protocol/README.md`, Operator presence) |
 | `events` | `event{robot.help_requested}`, `robot.lease_granted`, `robot.lease_released`, `robot.lease_revoked` |
 | `telemetry` | `event{robot.telemetry, robot_id, data: <the telemetry payload>}` for every robot in the fleet |
 | `layers` | every `layer.declare` / `layer.update` from services in the fleet; the retained ones are replayed right after the snapshot (2.7) |

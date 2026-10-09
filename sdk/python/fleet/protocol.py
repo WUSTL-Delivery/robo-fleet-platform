@@ -227,8 +227,19 @@ class RobotSummary(TypedDict):
     help: NotRequired[HelpDetails]
 
 
+class OperatorSummary(TypedDict):
+    """One operator of the fleet, as listed in snapshot.operators and carried as the data of operator.* events. Fields are only ever added.
+
+    Source: `protocol/schemas/defs.schema.json#/$defs/operatorSummary`
+    """
+
+    operator_id: str
+    name: NotRequired[str]
+    online: bool
+
+
 # Source: `protocol/schemas/defs.schema.json#/$defs/eventName`
-EventName = Literal["robot.online", "robot.offline", "robot.telemetry", "robot.help_requested", "robot.lease_granted", "robot.lease_released", "robot.lease_revoked"]
+EventName = Literal["robot.online", "robot.offline", "robot.telemetry", "robot.help_requested", "robot.lease_granted", "robot.lease_released", "robot.lease_revoked", "operator.online", "operator.offline"]
 
 
 class RawEnvelope(TypedDict):
@@ -259,13 +270,18 @@ class SnapshotPayload(TypedDict):
     """Source: `protocol/schemas/ops.schema.json#/$defs/snapshot`"""
 
     robots: list[RobotSummary]
+    #: Every operator of the fleet that is not revoked, online or not. The server always sends it.
+    operators: NotRequired[list[OperatorSummary]]
 
 
 class EventPayload(TypedDict):
     """Source: `protocol/schemas/ops.schema.json#/$defs/event`"""
 
     event: EventName
+    #: The robot the event is about. Set on every robot.* event, absent otherwise.
     robot_id: NotRequired[str]
+    #: The operator the event is about. Set on every operator.* event, absent otherwise.
+    operator_id: NotRequired[str]
     data: NotRequired[dict[str, Any]]
 
 

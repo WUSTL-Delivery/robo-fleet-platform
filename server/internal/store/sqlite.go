@@ -373,7 +373,17 @@ func (s *Sqlite) RedeemOperatorInvite(key, name string) (string, Client, error) 
 }
 
 func (s *Sqlite) RobotsInFleet(fleetID string) ([]Client, error) {
-	rows, err := s.db.Query(`SELECT id, fleet_id, kind, name FROM clients WHERE fleet_id = ? AND kind = 'robot' AND revoked_at IS NULL ORDER BY created_at`, fleetID)
+	return s.liveClientsOfKind(fleetID, KindRobot)
+}
+
+func (s *Sqlite) OperatorsInFleet(fleetID string) ([]Client, error) {
+	return s.liveClientsOfKind(fleetID, KindOperator)
+}
+
+// liveClientsOfKind lists a fleet's clients of one kind that are not revoked,
+// oldest first.
+func (s *Sqlite) liveClientsOfKind(fleetID string, kind Kind) ([]Client, error) {
+	rows, err := s.db.Query(`SELECT id, fleet_id, kind, name FROM clients WHERE fleet_id = ? AND kind = ? AND revoked_at IS NULL ORDER BY created_at`, fleetID, string(kind))
 	if err != nil {
 		return nil, err
 	}
@@ -381,11 +391,11 @@ func (s *Sqlite) RobotsInFleet(fleetID string) ([]Client, error) {
 	var out []Client
 	for rows.Next() {
 		var c Client
-		var kind string
-		if err := rows.Scan(&c.ID, &c.FleetID, &kind, &c.Name); err != nil {
+		var k string
+		if err := rows.Scan(&c.ID, &c.FleetID, &k, &c.Name); err != nil {
 			return nil, err
 		}
-		c.Kind = Kind(kind)
+		c.Kind = Kind(k)
 		out = append(out, c)
 	}
 	return out, rows.Err()

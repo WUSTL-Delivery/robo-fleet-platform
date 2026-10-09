@@ -125,6 +125,9 @@ type Store interface {
 
 	// RobotsInFleet returns the fleet's robots that are not revoked.
 	RobotsInFleet(fleetID string) ([]Client, error)
+	// OperatorsInFleet returns the fleet's operators that are not revoked,
+	// oldest first.
+	OperatorsInFleet(fleetID string) ([]Client, error)
 
 	Close() error
 }

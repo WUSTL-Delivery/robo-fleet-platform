@@ -169,8 +169,15 @@ func (a *App) OnConnect(c *gateway.Conn) {
 	if c.Client.Kind == store.KindService {
 		a.lay.OwnerUp(c.Client.ID)
 	}
-	if c.Client.Kind == store.KindRobot {
+	switch c.Client.Kind {
+	case store.KindRobot:
 		a.emit(c.Client.FleetID, bus.TopicPresence, protocol.Event{Event: protocol.EventRobotOnline, RobotID: c.Client.ID})
+	case store.KindOperator:
+		// A connection that replaces a live one is the same operator still
+		// online: no event. (The replaced conn's OnDisconnect is a no-op too.)
+		if prev == nil {
+			a.emitOperator(c.Client, true)
+		}
 	}
 }
 
@@ -196,6 +203,7 @@ func (a *App) OnDisconnect(c *gateway.Conn) {
 		for _, rv := range a.ops.DropOperator(c.Client.ID) {
 			a.notifyRevoked(rv)
 		}
+		a.emitOperator(c.Client, false)
 	}
 }
 
@@ -482,7 +490,15 @@ func (a *App) snapshot(fleetID string) protocol.Snapshot {
 	if err != nil {
 		slog.Error("app: snapshot query failed", "err", err)
 	}
-	snap := protocol.Snapshot{Robots: []protocol.RobotSummary{}}
+	snap := protocol.Snapshot{Robots: []protocol.RobotSummary{}, Operators: []protocol.OperatorSummary{}}
+	operators, err := a.st.OperatorsInFleet(fleetID)
+	if err != nil {
+		slog.Error("app: snapshot operator query failed", "err", err)
+	}
+	for _, o := range operators {
+		_, online := a.reg.Get(o.ID)
+		snap.Operators = append(snap.Operators, operatorSummary(o, online))
+	}
 	for _, r := range robots {
 		sum := protocol.RobotSummary{RobotID: r.ID, Name: r.Name, Presence: "offline"}
 		if e, ok := a.reg.Get(r.ID); ok {
@@ -502,6 +518,24 @@ func (a *App) snapshot(fleetID string) protocol.Snapshot {
 		snap.Robots = append(snap.Robots, sum)
 	}
 	return snap
+}
+
+// operatorSummary is an operator's entry in the snapshot and the data of its
+// presence events: one shape in both places, so a subscriber can upsert it.
+func operatorSummary(c store.Client, online bool) protocol.OperatorSummary {
+	return protocol.OperatorSummary{OperatorID: c.ID, Name: c.Name, Online: online}
+}
+
+// emitOperator announces an operator coming online or going offline to the
+// presence subscribers of its own fleet.
+func (a *App) emitOperator(c store.Client, online bool) {
+	name := protocol.EventOperatorOffline
+	if online {
+		name = protocol.EventOperatorOnline
+	}
+	a.emit(c.FleetID, bus.TopicPresence, protocol.Event{
+		Event: name, OperatorID: c.ID, Data: mustJSON(operatorSummary(c, online)),
+	})
 }
 
 // revokedMsg is the wire form of a revocation; it carries the queue entry when

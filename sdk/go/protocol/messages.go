@@ -56,6 +56,8 @@ const (
 	EventRobotLeaseGranted  = "robot.lease_granted"
 	EventRobotLeaseReleased = "robot.lease_released"
 	EventRobotLeaseRevoked  = "robot.lease_revoked"
+	EventOperatorOnline     = "operator.online"
+	EventOperatorOffline    = "operator.offline"
 )
 
 // Lease revocation reasons.
@@ -212,6 +214,18 @@ type Subscribe struct {
 
 type Snapshot struct {
 	Robots []RobotSummary `json:"robots"`
+	// Operators is every operator of the fleet that is not revoked. The server
+	// always sends an array, so a sender must set it non-nil (nil marshals as
+	// null, which the schema rejects). Decoding an older snapshot leaves it nil.
+	Operators []OperatorSummary `json:"operators"`
+}
+
+// OperatorSummary is one operator of the fleet: an entry of Snapshot.Operators
+// and the data of the operator.online / operator.offline events.
+type OperatorSummary struct {
+	OperatorID string `json:"operator_id"`
+	Name       string `json:"name,omitempty"`
+	Online     bool   `json:"online"`
 }
 
 type RobotSummary struct {
@@ -225,10 +239,13 @@ type RobotSummary struct {
 	Help *HelpDetails `json:"help,omitempty"`
 }
 
+// Event names its subject with RobotID (robot.* events) or OperatorID
+// (operator.* events), never both.
 type Event struct {
-	Event   string          `json:"event"`
-	RobotID string          `json:"robot_id,omitempty"`
-	Data    json.RawMessage `json:"data,omitempty"`
+	Event      string          `json:"event"`
+	RobotID    string          `json:"robot_id,omitempty"`
+	OperatorID string          `json:"operator_id,omitempty"`
+	Data       json.RawMessage `json:"data,omitempty"`
 }
 
 type LeaseClaim struct {

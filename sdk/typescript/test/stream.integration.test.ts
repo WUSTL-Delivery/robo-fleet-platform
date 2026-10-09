@@ -11,6 +11,7 @@ import {
   type Envelope,
   type FleetClientOptions,
   type FleetEvent,
+  type OperatorPresenceEvent,
   type PresenceEvent,
   type SnapshotPayload,
   type StateChange,
@@ -204,6 +205,46 @@ describe("subscribe, events and channels against fleet-server", () => {
     const offline = next<PresenceEvent>((h) => brain.onPresence(h), (e) => e.event === "robot.offline", "offline");
     robot.close();
     expect((await offline).robot_id).toBe(robotId);
+  });
+
+  it("lists operators in the snapshot and delivers operator presence as typed events", async () => {
+    const ada = makeClient({ kind: "operator", name: "ada", enrollmentKey: await mintOperatorInvite() });
+    const adaId = (await ada.connect()).client_id;
+    const snap = await ada.subscribe(["presence"]);
+    expect(snap.operators).toContainEqual({ operator_id: adaId, name: "ada", online: true });
+
+    // A wildcard handler sees the operator event too, with robot_id "".
+    const all: FleetEvent[] = [];
+    ada.onEvent((e) => all.push(e));
+
+    const online = next<FleetEvent<"operator.online">>((h) => ada.onEvent("operator.online", h), undefined, "operator.online");
+    const bo = makeClient({ kind: "operator", name: "bo", enrollmentKey: await mintOperatorInvite() });
+    const boId = (await bo.connect()).client_id;
+    const on = await online;
+    expect(on).toMatchObject({
+      event: "operator.online",
+      operator_id: boId,
+      robot_id: "",
+      data: { operator_id: boId, name: "bo", online: true },
+    });
+    expect(all.filter((e) => e.event === "operator.online" && e.operator_id === boId)).toHaveLength(1);
+
+    // The late operator finds both in its snapshot.
+    const late = await bo.subscribe(["presence"]);
+    expect(late.operators).toEqual(
+      expect.arrayContaining([
+        { operator_id: adaId, name: "ada", online: true },
+        { operator_id: boId, name: "bo", online: true },
+      ]),
+    );
+
+    const offline = next<OperatorPresenceEvent>(
+      (h) => ada.onEvent("operator.offline", h),
+      (e) => e.operator_id === boId,
+      "operator.offline",
+    );
+    bo.close();
+    expect((await offline).data).toEqual({ operator_id: boId, name: "bo", online: false });
   });
 
   it("re-subscribes after a reconnect and re-delivers a fresh snapshot before further events", async () => {

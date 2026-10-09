@@ -32,7 +32,7 @@ rejected for typed clients; domain traffic never invents envelope types — it r
 | `telemetry` | robot → server | frame-relative pose, velocity, battery, health |
 | `help.request` | robot → server | AUTONOMOUS → HELP_REQUESTED; enters intervention queue |
 | `subscribe` / `snapshot` | client → server / reply | **snapshot-then-stream**: current fleet state, then live events |
-| `event` | server → subscribers | typed lifecycle events (`robot.online`, `robot.help_requested`, …) |
+| `event` | server → subscribers | typed lifecycle events (`robot.online`, `robot.help_requested`, `operator.online`, …) |
 | `lease.claim` / `lease.renew` / `lease.release` | operator → server | authority requests; every transition is server-side |
 | `lease.granted` / `lease.revoked` | server → operator+robot | the lease itself; steal/expiry/operator-loss arrive as `revoked` |
 | `twist` | operator → robot | body-frame setpoint **carrying lease_id**; rides the WebRTC datachannel (bus fallback in sim), robot rejects without current lease |
@@ -87,6 +87,67 @@ revocation.
 
 The server rejects a `help.request` whose `reason` is empty or longer than 256 characters
 with `invalid_message`.
+
+## Operator presence
+
+Who is at a console. A `snapshot` lists the fleet's operators next to its robots, and the
+`presence` topic carries `operator.online` / `operator.offline` as they come and go.
+
+### The operator entry
+
+```json
+{ "operator_id": "o_9c8d7e6f", "name": "ada", "online": true }
+```
+
+- `operator_id` is the operator's client id, the same id a lease carries as `operator_id`.
+- `name` is the name given at enrollment; omitted when there is none.
+- `online` is true while the operator has a live connection.
+- The entry only ever gains fields. Consumers MUST keep working when one they do not know
+  appears, and SHOULD replace their whole stored entry with each one they receive.
+
+### In the snapshot
+
+`snapshot.operators` lists every operator of the fleet that is not revoked, online or
+not, oldest enrollment first. The server always sends it (an empty array when the fleet
+has no operators); the schema leaves it optional so that a snapshot from an older server
+still validates. The subscriber, if it is an operator, is in the list itself.
+
+### Events
+
+Both events ride the `presence` topic and have the same shape:
+
+```json
+{ "event": "operator.online", "operator_id": "o_9c8d7e6f",
+  "data": { "operator_id": "o_9c8d7e6f", "name": "ada", "online": true } }
+```
+
+- **An event names its subject with `robot_id` or `operator_id`, never both.** Every
+  `robot.*` event carries `robot_id` and no `operator_id`; every `operator.*` event
+  carries `operator_id` and no `robot_id`. A consumer that looks up `robot_id` on every
+  event must first check the event name (or that `robot_id` is present).
+- `data` is the operator entry as of the event, exactly as a snapshot taken at that
+  moment would list it. `operator.offline` carries it with `online: false`. Upsert it by
+  `operator_id`; no fresh snapshot is needed, including for an operator who enrolled
+  after the subscriber's snapshot.
+- Like all events they go to the operator's own fleet only.
+
+### What "online" means
+
+- One live connection per client id: a second connection with the same token replaces
+  the first, which is closed with `error{code: conflict}`. Two browser tabs signed in as
+  the same operator are therefore one operator with one connection, the newer tab's. The
+  replacement emits **no** event: the operator never went offline. `operator.offline` is
+  sent only when the operator's current connection ends (socket closed, heartbeat
+  lapsed, token revoked), and `operator.online` only when a connection arrives for an
+  operator who had none.
+- An operator does not receive its own `operator.online`: it is not subscribed yet when
+  it connects. It finds itself in its snapshot.
+- A revoked operator gets a last `operator.offline` and is absent from later snapshots.
+- `operator.offline` is also the moment the server revokes that operator's leases
+  (`robot.lease_revoked`, reason `operator_lost`, on the `events` topic).
+
+Golden examples: `fixtures/valid/snapshot.json`, `fixtures/valid/event-operator-online.json`,
+`fixtures/valid/event-operator-offline.json`.
 
 ## Acked send (convention on channel data)
 

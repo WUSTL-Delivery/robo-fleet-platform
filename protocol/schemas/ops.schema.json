@@ -21,6 +21,11 @@
         "robots": {
           "type": "array",
           "items": { "$ref": "defs.schema.json#/$defs/robotSummary" }
+        },
+        "operators": {
+          "description": "Every operator of the fleet that is not revoked, online or not. The server always sends it.",
+          "type": "array",
+          "items": { "$ref": "defs.schema.json#/$defs/operatorSummary" }
         }
       },
       "required": ["robots"],
@@ -30,7 +35,8 @@
       "type": "object",
       "properties": {
         "event": { "$ref": "defs.schema.json#/$defs/eventName" },
-        "robot_id": { "type": "string" },
+        "robot_id": { "description": "The robot the event is about. Set on every robot.* event, absent otherwise.", "type": "string" },
+        "operator_id": { "description": "The operator the event is about. Set on every operator.* event, absent otherwise.", "type": "string" },
         "data": { "type": "object" }
       },
       "required": ["event"],

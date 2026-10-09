@@ -106,6 +106,17 @@
       "required": ["robot_id", "presence", "state"],
       "additionalProperties": false
     },
+    "operatorSummary": {
+      "description": "One operator of the fleet, as listed in snapshot.operators and carried as the data of operator.* events. Fields are only ever added.",
+      "type": "object",
+      "properties": {
+        "operator_id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "online": { "type": "boolean" }
+      },
+      "required": ["operator_id", "online"],
+      "additionalProperties": false
+    },
     "channelName": {
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
@@ -118,7 +129,9 @@
         "robot.help_requested",
         "robot.lease_granted",
         "robot.lease_released",
-        "robot.lease_revoked"
+        "robot.lease_revoked",
+        "operator.online",
+        "operator.offline"
       ]
     }
   }

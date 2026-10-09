@@ -159,11 +159,22 @@ export interface RobotSummary {
   help?: HelpDetails;
 }
 
+/**
+ * One operator of the fleet, as listed in snapshot.operators and carried as the data of operator.* events. Fields are only ever added.
+ *
+ * Source: `protocol/schemas/defs.schema.json#/$defs/operatorSummary`
+ */
+export interface OperatorSummary {
+  operator_id: string;
+  name?: string;
+  online: boolean;
+}
+
 /** Source: `protocol/schemas/defs.schema.json#/$defs/channelName` */
 export type ChannelName = string;
 
 /** Source: `protocol/schemas/defs.schema.json#/$defs/eventName` */
-export type EventName = "robot.online" | "robot.offline" | "robot.telemetry" | "robot.help_requested" | "robot.lease_granted" | "robot.lease_released" | "robot.lease_revoked";
+export type EventName = "robot.online" | "robot.offline" | "robot.telemetry" | "robot.help_requested" | "robot.lease_granted" | "robot.lease_released" | "robot.lease_revoked" | "operator.online" | "operator.offline";
 
 /** Source: `protocol/schemas/envelope.schema.json` */
 export interface RawEnvelope {
@@ -191,12 +202,17 @@ export interface SubscribePayload {
 /** Source: `protocol/schemas/ops.schema.json#/$defs/snapshot` */
 export interface SnapshotPayload {
   robots: RobotSummary[];
+  /** Every operator of the fleet that is not revoked, online or not. The server always sends it. */
+  operators?: OperatorSummary[];
 }
 
 /** Source: `protocol/schemas/ops.schema.json#/$defs/event` */
 export interface EventPayload {
   event: EventName;
+  /** The robot the event is about. Set on every robot.* event, absent otherwise. */
   robot_id?: string;
+  /** The operator the event is about. Set on every operator.* event, absent otherwise. */
+  operator_id?: string;
   data?: {
     [k: string]: unknown;
   };
