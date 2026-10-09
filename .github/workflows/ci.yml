@@ -232,3 +232,17 @@ jobs:
             VERSION=${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  sdk-ros2:
+    name: ROS 2 fleet_agent
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Builds the ROS 2 dev image (sdk/ros2/Dockerfile), then inside it builds
+      # fleet-server and the colcon workspace and runs the tests; the launch tests
+      # run the node against a real fleet-server. Humble is the robot's distro.
+      - name: build and test in the ROS 2 container
+        run: sdk/ros2/test.sh
+        env:
+          ROS_DISTRO: humble
