@@ -109,7 +109,7 @@ The token stops authenticating at once. If the client is connected, the server s
 `error{code: auth_failed, message: "token revoked"}` and closes the socket; teardown is the
 ordinary disconnect path (a robot goes `robot.offline`, an operator's leases are revoked
 with reason `operator_lost`). Every later `hello` with that token gets `auth_failed`, which
-both SDKs treat as terminal, so a revoked robot does not reconnect-loop. A revoked robot
+every SDK treats as terminal, so a revoked robot does not reconnect-loop. A revoked robot
 also drops out of snapshots. Nothing else in the fleet is touched. There is no un-revoke:
 enroll it again as a new client.
 
@@ -213,6 +213,8 @@ kind's column returns `error{code: not_authorized}`.
 | `layer.declare` / `layer.update` | | ✓ | | GeoJSON map layers, see 2.7 |
 | `lease.claim` / `lease.renew` / `lease.release` | | | ✓ | intervention authority; a claim on a robot another operator is driving is refused unless it says `steal: true` (below) |
 | `twist` | | | ✓ | must carry a live `lease_id` the sender holds |
+| `watch` | | | ✓ | which robot the operator is looking at; fans out as `operator.watching` |
+| `ice.request` | ✓ | | ✓ | reply is `ice.config`: the installation's STUN/TURN servers and a short-lived TURN credential (§7.1) |
 
 Everything is scoped to the fleet the token belongs to. A `to` target in another fleet
 looks identical to a disconnected one: `error{code: not_found}`.
@@ -371,10 +373,11 @@ needs to command a robot uses the platform directly.
 ### 3.4 Thin club node on the robot (kind: `robot`, via `fleet_agent`)
 
 The generic `fleet_agent` (`sdk/ros2`, a ROS 2 node over the Python SDK) owns the socket,
-enrollment, heartbeat, manifest and telemetry today
-([`sdk/ros2/README.md`](../sdk/ros2/README.md)). Twist to `/cmd_vel`, the lease check and
-the deadman are its remaining job and are not in it yet (§8). The club node is the ~50
-lines that make it a delivery robot:
+enrollment, heartbeat, manifest and telemetry, publishes operator twist to `cmd_vel` behind
+the lease check and a two-timer deadman, and bridges each configured channel to
+`fleet/ch/<name>/in` and `/out` with help as the `fleet/request_help` service
+([`sdk/ros2/README.md`](../sdk/ros2/README.md)). The club node is the ~50 lines that make
+it a delivery robot:
 
 | It does | On the wire |
 |---|---|
@@ -385,8 +388,9 @@ lines that make it a delivery robot:
 | Escalate when a leg fails (policy is club code) | `help.request {reason, context}` |
 | Stop autonomy on takeover | on `lease.granted`, cancel the active Nav2 goal; on `lease.revoked`, report leg invalidated and wait for a new assignment |
 
-Until `fleet_agent` forwards twist and bridges channels to topics, a robot that must be
-driven or dispatched uses the Python SDK directly, as in §5.
+By default `fleet_agent` answers an acked send for the club node, which then sees each
+message's inner `data` once; list a channel under `raw_channels` to ack by hand as in the
+table. A robot without ROS uses the Python SDK directly, as in §5.
 
 ---
 
@@ -497,8 +501,8 @@ channels and the same snapshot-then-events model, but no acked-send helper yet.
 
 The robot side uses the Python SDK in `sdk/python` (`pip install -e sdk/python` from a
 checkout; not on PyPI yet). It owns the socket, enrollment, heartbeat, reconnect, the
-manifest, the lease check on twist, and the deadman. This is what `fleet_agent` will
-build on; the club node is the `on_assignment` and leg-reporting parts.
+manifest, the lease check on twist, and the deadman. This is what `fleet_agent`
+builds on; the club node is the `on_assignment` and leg-reporting parts.
 
 The generic, runnable version (no ROS, no delivery vocabulary) is
 [`sdk/python/examples/robot.py`](../sdk/python/examples/robot.py), and
@@ -796,12 +800,12 @@ Read this before designing against the server. Each item is a known gap, not a h
 
 | Gap | Consequence for you | Where it lands |
 |---|---|---|
-| **SDKs are source-only, and the ROS 2 node is partial.** `sdk/typescript`, `sdk/python` and `sdk/go` exist (§4, §5), but none is published (npm, PyPI, a resolvable Go module path). `fleet_agent` (`sdk/ros2`) does connection, manifest and telemetry; it does not forward operator twist to `cmd_vel` or bridge channels to topics yet | install from a checkout (`pip install -e sdk/python`; a `replace` directive for Go, §4); a ROS robot that must be driven wires the Python SDK's `on_twist` / `on_lease` to its topics by hand until `fleet_agent` does it | package publishing with the project rename; the `fleet_agent` twist bridge in the real-hardware phase |
+| **SDKs are source-only, and the ROS 2 node is partial.** `sdk/typescript`, `sdk/python` and `sdk/go` exist (§4, §5), but none is published (npm, PyPI, a resolvable Go module path). `fleet_agent` (`sdk/ros2`) does connection, manifest, telemetry, twist to `cmd_vel` with the lease check and deadman, and channels as topics, but has only been run in containers, not on a robot, and it carries no camera | install from a checkout (`pip install -e sdk/python`; a `replace` directive for Go, §4; `colcon build` for `fleet_agent`) | package publishing with the project rename; camera video in the real-hardware phase |
 | **Operator access is invite-only, from the CLI.** Operators redeem a single-use, expiring invite minted by `fleetctl invite operator` (D14), which needs the server's `FLEET_ADMIN_TOKEN`. There are no passwords, no roles, and no way to mint an invite from the console | whoever holds the admin token onboards every operator; an operator's token lives in their browser, and losing it means a new invite (revoke the lost one with `fleetctl client revoke`) | console-side invites through the same admin API, later |
 | **The console does not show layers.** It shows robots live on a map, renders what each manifest declares, and has the help queue, operator presence, take over / WASD / hand back, read-only spectating and steal. It does not render declared map layers yet, and a plain `go build` does not include it (`npm run embed` in `console/`, or the Docker image) | a service's layers have nowhere to show yet; build the image or embed the console before pointing an operator at `/` | layer rendering with the layer-streams work |
 | **Layer retention is in memory only** | the server replays each layer's latest declare and update to late `layers` subscribers, but a server restart forgets them, and a service's layers are dropped 5 minutes after it disconnects, so re-declare and re-send on every (re)connect | persisting layers in the store, if a deployment needs it |
 | **Rate limits are per connection and per type, not per subscriber** | a chatty `telemetry` or `channel.publish` loop is throttled (§2.8), not disconnected; a slow *reader* still overflows its 64-deep send queue and is dropped | per-subscriber fan-out limits, later |
-| **The direct teleop path is twist only.** Twist rides a WebRTC data channel between the console and the robot, with the bus as the fallback. The sim answers the console's offer, and so does the Python SDK when its optional `webrtc` extra is installed (`pip install -e 'sdk/python[webrtc]'`, `sdk/python/fleet/webrtc.py`); without the extra that robot is driven over the bus. `fleet_agent` forwards no twist on either path yet. No video, and no STUN or TURN server is configured | the direct path connects on loopback or one LAN, not across NATs; fine for sim and for testing the club node's lease handling; not for driving a real robot | roadmap step 3 |
+| **The direct teleop path is twist only.** Twist rides a WebRTC data channel between the console and the robot, with the bus as the fallback. The sim answers the console's offer, and so does the Python SDK when its optional `webrtc` extra is installed (`pip install -e 'sdk/python[webrtc]'`, `sdk/python/fleet/webrtc.py`); without the extra that robot is driven over the bus, and `fleet_agent` follows the SDK. Clients ask the server for STUN/TURN servers before each peer setup (§7.1); a relay-only run through coturn has been tested on one machine, not across real NATs or from a browser. No video | with no TURN server configured the direct path connects on loopback or one LAN only and teleop otherwise stays on the bus | camera video, roadmap step 3 |
 | **No replay / black-box recording** | | later milestone |
 | **Snapshot lists robots and operators, not services** | you cannot discover other services from a snapshot | if a real need appears |
 | **Placeholders**: Go module paths `fleetplatform/server` and `fleetplatform/sdk/go`, schema `$id` host `fleetplatform.local` | a Go service's SDK imports change with the rename (one search-and-replace of the `fleetplatform` prefix); do not hard-code the schema host in club code | project rename |

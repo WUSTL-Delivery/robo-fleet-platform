@@ -6,14 +6,14 @@
 // fleet-server signs (docs/INTEGRATION.md, section 7.1), so it is skipped
 // unless these are set:
 //
-//   FLEET_TEST_TURN_URLS    comma-separated, e.g. turn:127.0.0.1:3478?transport=udp
+//   FLEET_TEST_TURN_URLS    comma-separated, e.g. turn:127.0.0.1:34780?transport=udp
 //   FLEET_TEST_TURN_SECRET  the server's static-auth-secret
 //
-//   docker run --rm -p 3478:3478/udp coturn/coturn:4.6 -n --log-file=stdout \
+//   docker run --rm -p 34780:3478/udp coturn/coturn:4.6 -n --log-file=stdout \
 //     --listening-port=3478 --fingerprint --use-auth-secret \
 //     --static-auth-secret=relay-test-secret-0123456789 --realm=turn.test \
 //     --no-multicast-peers --no-tls --no-dtls
-//   FLEET_TEST_TURN_URLS='turn:127.0.0.1:3478?transport=udp' \
+//   FLEET_TEST_TURN_URLS='turn:127.0.0.1:34780?transport=udp' \
 //     FLEET_TEST_TURN_SECRET=relay-test-secret-0123456789 \
 //     npx vitest run test/relay.integration.test.ts
 //
