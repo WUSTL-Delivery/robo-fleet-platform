@@ -15,6 +15,14 @@ robot half of the wire protocol (docs/INTEGRATION.md, docs/DESIGN.md D3):
   ``deadman_ms`` (300 ms) after the last valid twist, and a lease revoke or a
   lost link commands zero velocity immediately. The robot never waits for the
   server to say the operator left.
+- **A lease is never trusted across a reconnect.** The server keeps a lease
+  when the robot's link blips, but the lease may also have ended while the
+  robot was away, with nobody to tell. So the ``welcome`` of every connection
+  states the lease the server holds for this robot, and the robot replaces
+  what it believed with that: the same lease is kept, another one is taken as
+  a grant, none (or a welcome that does not say, from an older server) drops
+  it. Until that welcome the robot obeys nothing (protocol/README.md, "A
+  robot's lease at connect").
 - **Twist over WebRTC** (optional; protocol/README.md, "Teleop data plane"):
   with the ``webrtc`` extra installed, the robot answers the lease holder's
   WebRTC offer and also takes twist from the ``twist`` data channel. Both
@@ -110,6 +118,8 @@ class LeaseChange:
     #: Server-side expiry of the lease, epoch ms (set on grant).
     expires_at_ms: Optional[int] = None
     #: Why it ended (set on revoke): released, expired, stolen, operator_lost.
+    #: None on a revoke when the lease ended while the robot was disconnected:
+    #: the welcome after the reconnect says it is gone, not why.
     reason: Optional[str] = None
 
 
@@ -366,7 +376,8 @@ class Robot:
         Valid means it bears the lease this robot holds and the manifest declares
         a drive. It may have come over the bus or the WebRTC data channel
         (``cmd.via``); the lease check and the deadman are the same. Stops (zero velocity) come from the deadman, a revoke, a new
-        lease replacing a moving one, or a lost link.
+        lease replacing a moving one, a lost link, or a reconnect that finds the
+        lease gone (source ``revoked``).
         """
         return _add(self._twist_handlers, handler)
 
@@ -383,6 +394,9 @@ class Robot:
     def _on_state(self, change: StateChange) -> Awaitable[None] | None:
         # Synchronous on purpose: the stop on a lost link must not wait a loop turn.
         if change.state is ConnectionState.OPEN:
+            # Before anything else on this connection is handled, and in the same
+            # loop turn that made channel twist obeyable again.
+            self._confirm_lease(change.welcome)
             return self._declare()  # scheduled by the client as its own task
         if change.state in (ConnectionState.RECONNECTING, ConnectionState.CLOSED):
             self._halt("disconnected")
@@ -393,22 +407,52 @@ class Robot:
                 self._peer.revoke()
         return None
 
+    def _confirm_lease(self, welcome: Mapping[str, Any] | None) -> None:
+        """Replaces what the robot believes about its lease with what the welcome states.
+
+        The server does not revoke a lease because the robot dropped, so a blip
+        normally finds the same lease here and the operator's twist resumes.
+        But it may have expired, been handed back or lost its operator while
+        the robot could not be told. Fail closed: the lease held before the
+        reconnect counts for nothing unless this welcome names it. A welcome
+        with ``"lease": null`` and one with no ``lease`` at all (a server that
+        predates the field) are the same answer: nothing is confirmed.
+        """
+        stated = welcome.get("lease") if welcome is not None else None
+        if isinstance(stated, Mapping) and stated.get("robot_id") == self._client.client_id:
+            lease_id = stated.get("lease_id")
+            if self._lease is not None and lease_id == self._lease_id:
+                # Still ours. Nothing to announce; the expiry may have moved.
+                self._lease = LeaseChange(
+                    granted=True,
+                    lease_id=self._lease.lease_id,
+                    operator_id=self._lease.operator_id,
+                    expires_at_ms=stated.get("expires_at_ms"),
+                )
+                return
+            if self._grant(stated):
+                return  # a lease this robot did not know of (it restarted, or the grant crossed the drop)
+        if self._lease_id is not None:
+            log.warning("lease %s ended while disconnected; dropping it", self._lease_id)
+            self._drop(None)
+
     async def _declare(self) -> None:
-        # Declare on every (re)connect. The lease id is kept across a link blip:
-        # the server does not revoke it when the robot drops, so the operator's
-        # twist resumes once the link is back.
+        # Declare on every (re)connect: the server forgets the manifest on a drop.
         try:
             await self._client.send("manifest", self._manifest)
         except FleetClientError as e:
             log.warning("could not send manifest: %s", e)
 
     def _on_granted(self, env: Envelope) -> None:
-        p = env["payload"]
+        self._grant(env["payload"])
+
+    def _grant(self, p: Mapping[str, Any]) -> bool:
+        """Takes the lease in ``p`` (lease.granted, or the welcome's lease). False if it is not one for this robot."""
         lease_id = p.get("lease_id")
         if not isinstance(lease_id, str) or not lease_id:
-            return
+            return False
         if p.get("robot_id") != self._client.client_id:
-            return
+            return False
         if self._lease_id is not None and lease_id != self._lease_id:
             # A steal: the old driver's last setpoint must not carry over.
             self._halt("revoked")
@@ -429,13 +473,20 @@ class Robot:
             else:
                 self._peer.revoke()
         self._emit(self._lease_handlers, self._lease)
+        return True
 
     def _on_revoked(self, env: Envelope) -> None:
         p = env["payload"]
         lease_id = p.get("lease_id")
         if lease_id is None or lease_id != self._lease_id:
             return
-        reason = p.get("reason")
+        self._drop(p.get("reason"))
+
+    def _drop(self, reason: str | None) -> None:
+        """Stops and forgets the lease held. ``reason`` is None when no revocation was heard."""
+        lease_id = self._lease_id
+        if lease_id is None:
+            return
         self._halt("revoked")
         self._lease_id = None
         self._lease = None
@@ -443,6 +494,7 @@ class Robot:
         if self._peer is not None:
             self._peer.revoke()  # cleanup that follows the lease decision, never the cause of it
         # Handback resumes autonomy; expiry / operator loss / steal leave it needing help.
+        # So does a lease that ended unheard: without the reason, assume the cautious one.
         self._mode = "autonomous" if reason == "released" else "help"
         self._emit(self._lease_handlers, LeaseChange(granted=False, lease_id=lease_id, reason=reason))
 
