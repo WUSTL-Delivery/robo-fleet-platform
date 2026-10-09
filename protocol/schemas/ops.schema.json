@@ -82,6 +82,19 @@
       },
       "required": ["lease_id", "robot_id", "reason"],
       "additionalProperties": false
+    },
+    "watch": {
+      "description": "Operator to server: which robot this operator is looking at. It lasts as long as the connection that sent it.",
+      "type": "object",
+      "properties": {
+        "robot_id": {
+          "description": "A robot of the operator's fleet, or null to stop watching.",
+          "type": ["string", "null"],
+          "minLength": 1
+        }
+      },
+      "required": ["robot_id"],
+      "additionalProperties": false
     }
   }
 }

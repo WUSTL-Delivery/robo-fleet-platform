@@ -19,6 +19,7 @@
     "lease.renew": "schemas/ops.schema.json#/$defs/lease.renew",
     "lease.release": "schemas/ops.schema.json#/$defs/lease.release",
     "lease.revoked": "schemas/ops.schema.json#/$defs/lease.revoked",
+    "watch": "schemas/ops.schema.json#/$defs/watch",
     "channel.publish": "schemas/bus.schema.json#/$defs/channel.publish",
     "channel.message": "schemas/bus.schema.json#/$defs/channel.message",
     "signal": "schemas/bus.schema.json#/$defs/signal",

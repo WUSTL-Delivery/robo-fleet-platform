@@ -35,6 +35,7 @@ rejected for typed clients; domain traffic never invents envelope types — it r
 | `event` | server → subscribers | typed lifecycle events (`robot.online`, `robot.help_requested`, `operator.online`, …) |
 | `lease.claim` / `lease.renew` / `lease.release` | operator → server | authority requests; every transition is server-side. A claim takes a robot from another operator only with `steal: true` (see [Claiming a lease](#claiming-a-lease)) |
 | `lease.granted` / `lease.revoked` | server → operator+robot | the lease itself; steal/expiry/operator-loss arrive as `revoked` |
+| `watch` | operator → server | which robot the operator is looking at, or `null` for none; the fleet hears it as `operator.watching` (see [Watching a robot](#watching-a-robot)) |
 | `twist` | operator → robot | body-frame setpoint **carrying lease_id**; rides the WebRTC datachannel (bus fallback in sim), robot rejects without current lease |
 | `signal` | relayed via server | WebRTC offer/answer/ICE; sender sets `to`, server stamps `from` |
 | `channel.publish` / `channel.message` | service ↔ server ↔ client | opaque domain channels (assignments, edge reports); at-most-once (see [Acked send](#acked-send-convention-on-channel-data)) |
@@ -140,18 +141,22 @@ with `invalid_message`.
 
 ## Operator presence
 
-Who is at a console. A `snapshot` lists the fleet's operators next to its robots, and the
-`presence` topic carries `operator.online` / `operator.offline` as they come and go.
+Who is at a console, and which robot each of them is looking at. A `snapshot` lists the
+fleet's operators next to its robots, and the `presence` topic carries `operator.online` /
+`operator.offline` as they come and go and `operator.watching` as they move between robots.
 
 ### The operator entry
 
 ```json
-{ "operator_id": "o_9c8d7e6f", "name": "ada", "online": true }
+{ "operator_id": "o_9c8d7e6f", "name": "ada", "online": true, "watching": "r_1a2b3c4d" }
 ```
 
 - `operator_id` is the operator's client id, the same id a lease carries as `operator_id`.
 - `name` is the name given at enrollment; omitted when there is none.
 - `online` is true while the operator has a live connection.
+- `watching` is the id of the robot the operator is looking at (see
+  [Watching a robot](#watching-a-robot)). It is omitted, never `null`, when the operator
+  is watching none, and it is never set while `online` is false.
 - The entry only ever gains fields. Consumers MUST keep working when one they do not know
   appears, and SHOULD replace their whole stored entry with each one they receive.
 
@@ -164,7 +169,8 @@ still validates. The subscriber, if it is an operator, is in the list itself.
 
 ### Events
 
-Both events ride the `presence` topic and have the same shape:
+All three events (`operator.online`, `operator.offline`, `operator.watching`) ride the
+`presence` topic and have the same shape:
 
 ```json
 { "event": "operator.online", "operator_id": "o_9c8d7e6f",
@@ -178,7 +184,8 @@ Both events ride the `presence` topic and have the same shape:
 - `data` is the operator entry as of the event, exactly as a snapshot taken at that
   moment would list it. `operator.offline` carries it with `online: false`. Upsert it by
   `operator_id`; no fresh snapshot is needed, including for an operator who enrolled
-  after the subscriber's snapshot.
+  after the subscriber's snapshot. The entry is whole every time: one that arrives
+  without `watching` means the operator is watching nothing now.
 - Like all events they go to the operator's own fleet only.
 
 ### What "online" means
@@ -192,12 +199,73 @@ Both events ride the `presence` topic and have the same shape:
   operator who had none.
 - An operator does not receive its own `operator.online`: it is not subscribed yet when
   it connects. It finds itself in its snapshot.
+- A second connection does replace what the operator is watching; see
+  [Watching a robot](#watching-a-robot).
 - A revoked operator gets a last `operator.offline` and is absent from later snapshots.
 - `operator.offline` is also the moment the server revokes that operator's leases
   (`robot.lease_revoked`, reason `operator_lost`, on the `events` topic).
 
 Golden examples: `fixtures/valid/snapshot.json`, `fixtures/valid/event-operator-online.json`,
 `fixtures/valid/event-operator-offline.json`.
+
+### Watching a robot
+
+An operator tells the server which robot it has open, so that everyone else in the fleet
+can see who is looking at what:
+
+```json
+{ "v": 0, "type": "watch", "id": "watch-1", "payload": { "robot_id": "r_1a2b3c4d" } }
+{ "v": 0, "type": "watch", "payload": { "robot_id": null } }
+```
+
+`robot_id` is required: a robot id to watch that robot (replacing whatever the operator
+watched before, one robot at a time), or `null` to watch none. Watching is presence only.
+It grants nothing, the robot is not told, and it is independent of leases: an operator
+can drive one robot and watch another, and any number of operators can watch the same one.
+
+When the value changed, the server sends `operator.watching` to the fleet's `presence`
+subscribers, carrying the operator's entry like the other operator events:
+
+```json
+{ "event": "operator.watching", "operator_id": "o_9c8d7e6f",
+  "data": { "operator_id": "o_9c8d7e6f", "name": "ada", "online": true, "watching": "r_1a2b3c4d" } }
+```
+
+After `watch {robot_id: null}` the same event arrives with no `watching` in `data`. A late
+joiner needs no event: `snapshot.operators` carries `watching` on each entry.
+
+- **No reply.** A `watch` that is accepted is not answered. The sender, if it subscribed
+  to `presence`, receives its own `operator.watching` like everyone else.
+- **A redundant watch is silent.** Naming the robot the operator already watches, or
+  `null` when it watches none, changes nothing and emits nothing.
+- **Operators only.** From a robot or a service it is `error{code: not_authorized}`.
+- **The robot must be one the sender's snapshot lists**: a robot of its own fleet that is
+  not revoked, online or offline. Anything else is `error{code: not_found}` with the same
+  message in every case: an id that does not exist, a robot of another fleet, a client
+  that is not a robot. So ids never leak across fleets. A missing, empty or non-string
+  `robot_id` is `invalid_message`. A refused `watch` leaves the previous value in place
+  and tells nobody else.
+- **It lasts as long as the connection that sent it.** The server forgets it when that
+  connection ends, so a client MUST send `watch` again after every connect, including
+  the SDKs' automatic reconnects, if it is still showing a robot.
+  - Disconnect, heartbeat lapse and token revocation end in `operator.offline`, whose
+    entry has no `watching`. That one event clears it; no `operator.watching` is sent.
+  - A second connection with the same token replaces the first without the operator
+    going offline (see below). The new connection starts out watching nothing, so if the
+    old one was watching a robot the fleet gets `operator.watching` with no `watching`.
+    If it was not, the replacement is silent as before.
+- **The robot going offline changes nothing.** If the robot is revoked, every operator
+  watching it gets an `operator.watching` with no `watching`.
+- **Rate limited.** `watch` is metered per connection with its own bucket, like
+  `telemetry`. A `watch` over the limit is dropped and answered with
+  `error{code: rate_limited, ref}` (at most one notice per second), and the server keeps
+  the last value that got through. A console SHOULD send only the selection it has
+  settled on (debounce rapid changes), give each `watch` an envelope `id`, and on a
+  `rate_limited` error send its current selection once more after a pause.
+
+Golden examples: `fixtures/valid/watch.json`, `fixtures/valid/watch-clear.json`,
+`fixtures/valid/event-operator-watching.json`,
+`fixtures/valid/event-operator-watching-cleared.json`.
 
 ## Acked send (convention on channel data)
 

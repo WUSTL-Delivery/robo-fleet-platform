@@ -236,10 +236,12 @@ class OperatorSummary(TypedDict):
     operator_id: str
     name: NotRequired[str]
     online: bool
+    #: The robot this operator is looking at. Absent when it is watching none; never set while online is false.
+    watching: NotRequired[str]
 
 
 # Source: `protocol/schemas/defs.schema.json#/$defs/eventName`
-EventName = Literal["robot.online", "robot.offline", "robot.telemetry", "robot.help_requested", "robot.lease_granted", "robot.lease_released", "robot.lease_revoked", "operator.online", "operator.offline"]
+EventName = Literal["robot.online", "robot.offline", "robot.telemetry", "robot.help_requested", "robot.lease_granted", "robot.lease_released", "robot.lease_revoked", "operator.online", "operator.offline", "operator.watching"]
 
 
 class RawEnvelope(TypedDict):
@@ -321,6 +323,16 @@ class LeaseRevokedPayload(TypedDict):
     help: NotRequired[HelpDetails]
 
 
+class WatchPayload(TypedDict):
+    """Operator to server: which robot this operator is looking at. It lasts as long as the connection that sent it.
+
+    Source: `protocol/schemas/ops.schema.json#/$defs/watch`
+    """
+
+    #: A robot of the operator's fleet, or null to stop watching.
+    robot_id: Union[str, None]
+
+
 # Source: `protocol/schemas/robot.schema.json#/$defs/manifest`
 ManifestPayload = Manifest
 
@@ -397,6 +409,7 @@ MessageType = Literal[
     "lease.renew",
     "lease.release",
     "lease.revoked",
+    "watch",
     "channel.publish",
     "channel.message",
     "signal",
@@ -424,6 +437,7 @@ MESSAGE_TYPES: Final[tuple[MessageType, ...]] = (
     "lease.renew",
     "lease.release",
     "lease.revoked",
+    "watch",
     "channel.publish",
     "channel.message",
     "signal",
@@ -451,6 +465,7 @@ PAYLOAD_TYPES: Final[dict[str, Any]] = {
     "lease.renew": LeaseRenewPayload,
     "lease.release": LeaseReleasePayload,
     "lease.revoked": LeaseRevokedPayload,
+    "watch": WatchPayload,
     "channel.publish": ChannelPublishPayload,
     "channel.message": ChannelMessagePayload,
     "signal": SignalPayload,

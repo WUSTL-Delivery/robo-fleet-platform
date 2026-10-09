@@ -25,6 +25,7 @@ import type {
   SubscribePayload,
   TelemetryPayload,
   TwistPayload,
+  WatchPayload,
   WelcomePayload,
 } from "./protocol.js";
 
@@ -50,6 +51,7 @@ export interface MessagePayloads {
   "lease.renew": LeaseRenewPayload;
   "lease.release": LeaseReleasePayload;
   "lease.revoked": LeaseRevokedPayload;
+  "watch": WatchPayload;
   "channel.publish": ChannelPublishPayload;
   "channel.message": ChannelMessagePayload;
   "signal": SignalPayload;
@@ -79,6 +81,7 @@ export const MESSAGE_TYPES = [
   "lease.renew",
   "lease.release",
   "lease.revoked",
+  "watch",
   "channel.publish",
   "channel.message",
   "signal",

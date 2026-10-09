@@ -1,0 +1,6 @@
+{
+  "v": 0,
+  "type": "watch",
+  "id": "watch-1",
+  "payload": { "robot_id": "r_1a2b3c4d" }
+}
