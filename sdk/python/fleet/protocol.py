@@ -207,6 +207,14 @@ class Lease(TypedDict):
     expires_at_ms: int
 
 
+class HelpDetails(TypedDict):
+    """Source: `protocol/schemas/defs.schema.json#/$defs/helpDetails`"""
+
+    reason: str
+    context: NotRequired[dict[str, Any]]
+    requested_at_ms: int
+
+
 class RobotSummary(TypedDict):
     """Source: `protocol/schemas/defs.schema.json#/$defs/robotSummary`"""
 
@@ -216,6 +224,7 @@ class RobotSummary(TypedDict):
     state: RobotState
     manifest: NotRequired[Manifest]
     lease: NotRequired[Lease]
+    help: NotRequired[HelpDetails]
 
 
 # Source: `protocol/schemas/defs.schema.json#/$defs/eventName`
@@ -289,6 +298,7 @@ class LeaseRevokedPayload(TypedDict):
     lease_id: str
     robot_id: str
     reason: Literal["released", "expired", "stolen", "operator_lost"]
+    help: NotRequired[HelpDetails]
 
 
 # Source: `protocol/schemas/robot.schema.json#/$defs/manifest`

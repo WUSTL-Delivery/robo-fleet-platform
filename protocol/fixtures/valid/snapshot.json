@@ -11,6 +11,11 @@
         "manifest": {
           "drive": { "type": "twist", "max_v_mps": 1.5, "max_w_radps": 2.0 },
           "battery": {}
+        },
+        "help": {
+          "reason": "nav_goal_failed",
+          "context": { "attempts": 3 },
+          "requested_at_ms": 1755100002000
         }
       },
       {

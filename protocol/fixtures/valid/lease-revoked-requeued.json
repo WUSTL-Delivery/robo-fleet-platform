@@ -1,11 +1,12 @@
 {
   "v": 0,
-  "type": "event",
-  "ts_ms": 1755100002001,
+  "type": "lease.revoked",
+  "ts_ms": 1755100031000,
   "payload": {
-    "event": "robot.help_requested",
+    "lease_id": "ls_9f8e7d6c5b4a3210",
     "robot_id": "r_1a2b3c4d",
-    "data": {
+    "reason": "expired",
+    "help": {
       "reason": "nav_goal_failed",
       "context": { "attempts": 3 },
       "requested_at_ms": 1755100002000

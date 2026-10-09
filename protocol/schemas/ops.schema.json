@@ -67,7 +67,8 @@
       "properties": {
         "lease_id": { "type": "string", "minLength": 1 },
         "robot_id": { "type": "string", "minLength": 1 },
-        "reason": { "enum": ["released", "expired", "stolen", "operator_lost"] }
+        "reason": { "enum": ["released", "expired", "stolen", "operator_lost"] },
+        "help": { "$ref": "defs.schema.json#/$defs/helpDetails" }
       },
       "required": ["lease_id", "robot_id", "reason"],
       "additionalProperties": false

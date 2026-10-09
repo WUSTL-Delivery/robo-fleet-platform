@@ -1,0 +1,14 @@
+{
+  "v": 0,
+  "type": "snapshot",
+  "payload": {
+    "robots": [
+      {
+        "robot_id": "r_1a2b3c4d",
+        "presence": "online",
+        "state": "HELP_REQUESTED",
+        "help": { "reason": "nav_goal_failed" }
+      }
+    ]
+  }
+}

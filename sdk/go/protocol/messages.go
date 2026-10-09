@@ -181,6 +181,16 @@ type HelpRequest struct {
 	Context map[string]any `json:"context,omitempty"`
 }
 
+// HelpDetails is one intervention queue entry: what the robot asked for and
+// when it entered the queue (server clock, epoch millis). Carried on a
+// HELP_REQUESTED robot's snapshot entry, as the robot.help_requested event
+// data, and on a lease revocation that puts the robot back in the queue.
+type HelpDetails struct {
+	Reason        string         `json:"reason"`
+	Context       map[string]any `json:"context,omitempty"`
+	RequestedAtMs int64          `json:"requested_at_ms"`
+}
+
 type Twist struct {
 	LeaseID string       `json:"lease_id"`
 	Linear  TwistLinear  `json:"linear"`
@@ -211,6 +221,8 @@ type RobotSummary struct {
 	State    string    `json:"state"`
 	Manifest *Manifest `json:"manifest,omitempty"`
 	Lease    *Lease    `json:"lease,omitempty"`
+	// Help is set only while State is HELP_REQUESTED.
+	Help *HelpDetails `json:"help,omitempty"`
 }
 
 type Event struct {
@@ -243,6 +255,8 @@ type LeaseRevoked struct {
 	LeaseID string `json:"lease_id"`
 	RobotID string `json:"robot_id"`
 	Reason  string `json:"reason"`
+	// Help is set when the revocation returned the robot to HELP_REQUESTED.
+	Help *HelpDetails `json:"help,omitempty"`
 }
 
 type ChannelPublish struct {
