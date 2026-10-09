@@ -3,8 +3,9 @@
 > Audience: someone building a fleet application on top of this repo. The worked example
 > throughout is the club's delivery system,
 > [`delivery-gdg-platform`](https://github.com/WUSTL-Delivery/delivery-gdg-platform), which
-> is the reference deployment. Everything here is verified against the server as of commit
-> `b4faef9` (protocol v0). Where v0 has a gap, the gap is called out rather than papered over.
+> is the reference deployment. Everything here describes protocol v0 as the server in this
+> checkout implements it; `git log -1 docs/INTEGRATION.md` shows when it was last revised.
+> Where v0 has a gap, the gap is called out rather than papered over.
 
 The one-sentence model: **your app is a client, not a fork.** Robots and your backend
 services each hold one outbound WebSocket to `fleet-server`; the platform owns
@@ -139,8 +140,9 @@ the image's HEALTHCHECK runs. Tags and the release process are in `docs/RELEASIN
 
 The full contract is `protocol/` (JSON Schema, draft 2020-12) and it is the source of
 truth; `protocol/README.md` has the message catalog. This section is the subset you need
-to integrate. There is no SDK yet (§8), so today you speak raw JSON over WebSocket. The
-shapes below are exactly what the SDKs will wrap.
+to integrate. The SDKs in `sdk/typescript`, `sdk/python` and `sdk/go` wrap exactly these
+shapes (§4, §5; none is published yet, §8). A client in another language speaks them as
+raw JSON over WebSocket.
 
 ### 2.1 Envelope
 
@@ -307,8 +309,8 @@ last frame before the close.
 
 `conflict` is also the ordinary reply to a `lease.claim` on a robot another operator
 holds (2.4). That one keeps the socket open and carries a fourth field, `lease`, the
-lease in the way. A closing error has neither `ref` nor `lease`; the TypeScript and
-Python clients use that to keep a refused claim from ending the connection.
+lease in the way. A closing error has neither `ref` nor `lease`; the TypeScript, Python
+and Go clients use that to keep a refused claim from ending the connection.
 
 `telemetry`, `channel.publish` and `watch` are rate limited per connection, each type with its own
 token bucket (`client_msgs_per_sec`, `client_msgs_burst`; defaults 50/s and 100). Over the
@@ -368,9 +370,11 @@ needs to command a robot uses the platform directly.
 
 ### 3.4 Thin club node on the robot (kind: `robot`, via `fleet_agent`)
 
-The generic `fleet_agent` (planned, `sdk/ros2`, Python) owns the socket, manifest,
-heartbeat, twist to `/cmd_vel`, lease check, and deadman. The club node is the ~50 lines
-that make it a delivery robot:
+The generic `fleet_agent` (`sdk/ros2`, a ROS 2 node over the Python SDK) owns the socket,
+enrollment, heartbeat, manifest and telemetry today
+([`sdk/ros2/README.md`](../sdk/ros2/README.md)). Twist to `/cmd_vel`, the lease check and
+the deadman are its remaining job and are not in it yet (§8). The club node is the ~50
+lines that make it a delivery robot:
 
 | It does | On the wire |
 |---|---|
@@ -381,7 +385,8 @@ that make it a delivery robot:
 | Escalate when a leg fails (policy is club code) | `help.request {reason, context}` |
 | Stop autonomy on takeover | on `lease.granted`, cancel the active Nav2 goal; on `lease.revoked`, report leg invalidated and wait for a new assignment |
 
-Until `fleet_agent` exists, the robot side is the Python SDK used directly, as in §5.
+Until `fleet_agent` forwards twist and bridges channels to topics, a robot that must be
+driven or dispatched uses the Python SDK directly, as in §5.
 
 ---
 
@@ -790,10 +795,10 @@ Read this before designing against the server. Each item is a known gap, not a h
 |---|---|---|
 | **SDKs are source-only, and the ROS 2 node is partial.** `sdk/typescript`, `sdk/python` and `sdk/go` exist (§4, §5), but none is published (npm, PyPI, a resolvable Go module path). `fleet_agent` (`sdk/ros2`) does connection, manifest and telemetry; it does not forward operator twist to `cmd_vel` or bridge channels to topics yet | install from a checkout (`pip install -e sdk/python`; a `replace` directive for Go, §4); a ROS robot that must be driven wires the Python SDK's `on_twist` / `on_lease` to its topics by hand until `fleet_agent` does it | package publishing with the project rename; the `fleet_agent` twist bridge in the real-hardware phase |
 | **Operator access is invite-only, from the CLI.** Operators redeem a single-use, expiring invite minted by `fleetctl invite operator` (D14), which needs the server's `FLEET_ADMIN_TOKEN`. There are no passwords, no roles, and no way to mint an invite from the console | whoever holds the admin token onboards every operator; an operator's token lives in their browser, and losing it means a new invite (revoke the lost one with `fleetctl client revoke`) | console-side invites through the same admin API, later |
-| **The console is basic.** It shows robots live on a map, renders what each manifest declares, and does take over / WASD / hand back. It does not render declared map layers yet, and a plain `go build` does not include it (`npm run embed` in `console/`, or the Docker image) | a service's layers have nowhere to show yet; build the image or embed the console before pointing an operator at `/` | layer rendering with the layer-streams work |
+| **The console does not show layers.** It shows robots live on a map, renders what each manifest declares, and has the help queue, operator presence, take over / WASD / hand back, read-only spectating and steal. It does not render declared map layers yet, and a plain `go build` does not include it (`npm run embed` in `console/`, or the Docker image) | a service's layers have nowhere to show yet; build the image or embed the console before pointing an operator at `/` | layer rendering with the layer-streams work |
 | **Layer retention is in memory only** | the server replays each layer's latest declare and update to late `layers` subscribers, but a server restart forgets them, and a service's layers are dropped 5 minutes after it disconnects, so re-declare and re-send on every (re)connect | persisting layers in the store, if a deployment needs it |
 | **Rate limits are per connection and per type, not per subscriber** | a chatty `telemetry` or `channel.publish` loop is throttled (§2.8), not disconnected; a slow *reader* still overflows its 64-deep send queue and is dropped | per-subscriber fan-out limits, later |
-| **The direct teleop path is twist only, console to sim only.** Twist rides a WebRTC data channel between the console and a sim robot, with the bus as the fallback. The Python SDK and `fleet_agent` do not answer the offer, so those robots are driven over the bus. No video, and no STUN or TURN server is configured | the direct path connects on loopback or one LAN, not across NATs; fine for sim and for testing the club node's lease handling; not for driving a real robot | roadmap step 3 |
+| **The direct teleop path is twist only.** Twist rides a WebRTC data channel between the console and the robot, with the bus as the fallback. The sim answers the console's offer, and so does the Python SDK when its optional `webrtc` extra is installed (`pip install -e 'sdk/python[webrtc]'`, `sdk/python/fleet/webrtc.py`); without the extra that robot is driven over the bus. `fleet_agent` forwards no twist on either path yet. No video, and no STUN or TURN server is configured | the direct path connects on loopback or one LAN, not across NATs; fine for sim and for testing the club node's lease handling; not for driving a real robot | roadmap step 3 |
 | **No replay / black-box recording** | | later milestone |
 | **Snapshot lists robots and operators, not services** | you cannot discover other services from a snapshot | if a real need appears |
 | **Placeholders**: Go module paths `fleetplatform/server` and `fleetplatform/sdk/go`, schema `$id` host `fleetplatform.local` | a Go service's SDK imports change with the rename (one search-and-replace of the `fleetplatform` prefix); do not hard-code the schema host in club code | project rename |
