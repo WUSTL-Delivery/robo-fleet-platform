@@ -11,6 +11,10 @@ While it runs, type a command and press Enter:
     p  pause / resume wandering
     q  quit
 
+With the SDK's webrtc extra installed (pip install -e '..[webrtc]'), it also answers the
+operator's WebRTC offer and takes twist from the data channel; it prints which transport
+the operator's twist is arriving on. Without the extra it is driven over the bus.
+
 The first run enrolls with FLEET_ENROLL_KEY and saves a token to ~/.fleet/<name>.json;
 later runs reuse that token and come back as the same robot, with no key needed.
 """
@@ -19,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import math
 import os
 import random
@@ -43,6 +48,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--help-after", type=float, default=float(env("FAKE_HELP_AFTER_S", "0")),
                    help="ask for help after N seconds (0 = never)")
     p.add_argument("--no-wander", action="store_true", help="sit still unless an operator drives")
+    p.add_argument("--no-data-channel", action="store_true",
+                   help="never answer a WebRTC offer; twist over the bus only")
+    p.add_argument("--ice-servers", default=env("FLEET_ICE_SERVERS", ""),
+                   help='STUN/TURN servers as JSON, e.g. \'[{"urls": "stun:stun.example.org:3478"}]\'. '
+                        "Default none: host candidates only, enough on one machine or one LAN")
     return p.parse_args()
 
 
@@ -87,15 +97,25 @@ async def main() -> None:
         },
         enrollment_key=os.environ.get("FLEET_ENROLL_KEY") or None,
         token_store=FileTokenStore(args.token_file or f"~/.fleet/{args.name}.json"),
+        # None: answer WebRTC offers if aiortc is installed, stay on the bus if it is not.
+        data_channel=False if args.no_data_channel else None,
+        ice_servers=json.loads(args.ice_servers) if args.ice_servers else None,
     )
+    via = None  # the transport the operator's twist last arrived on
 
     def on_twist(cmd: TwistCommand) -> None:
         # Operator setpoints, or a zero from the SDK (deadman, revoke, lost link).
+        nonlocal via
         body.v, body.w = cmd.linear_x, cmd.angular_z
         if cmd.source != "operator":
             print(f"  stop ({cmd.source})")
+        elif cmd.via != via:
+            via = cmd.via
+            print("  twist over the WebRTC data channel" if via == "p2p" else "  twist over the bus")
 
     def on_lease(change) -> None:
+        nonlocal via
+        via = None
         if change.granted:
             print(f"  operator {change.operator_id} took over")
         else:
@@ -125,6 +145,9 @@ async def main() -> None:
             print("hint: first run needs FLEET_ENROLL_KEY; a revoked robot needs a new --name")
         return
     print(f"{args.name} online as {robot.robot_id} at {args.url}")
+    print("data channel:", "answers WebRTC offers" if robot.data_channel_enabled
+          else "off (bus twist only)" if args.no_data_channel
+          else "off (bus twist only; install the webrtc extra to turn it on)")
     print("commands: h = ask for help, p = pause/resume wandering, q = quit")
 
     stop = asyncio.Event()
