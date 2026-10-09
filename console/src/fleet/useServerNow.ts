@@ -36,8 +36,16 @@ export function useServerNow(client: FleetClient, ticking: boolean): number {
   useEffect(() => {
     if (!ticking) return;
     setNow(read());
-    const t = setInterval(() => setNow(read()), TICK_MS);
-    return () => clearInterval(t);
+    const refresh = () => setNow(read());
+    const t = setInterval(refresh, TICK_MS);
+    // Browsers slow or stop timers in a hidden tab. The value is recomputed
+    // from the clocks on every tick, so it is right again on the first one;
+    // this makes that immediate when the tab is shown.
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", refresh);
+    };
     // `read` only touches the ref and the clocks, so it is not a dependency.
   }, [ticking]);
 
