@@ -31,11 +31,9 @@ async def main() -> None:
 
     jobs = robot.channel("jobs")  # opaque to the platform: any JSON your services agree on
 
-    async def on_job(sender: str, data: object) -> None:
-        print("job from", sender, data)
-        await jobs.publish({"accepted": data}, to=sender)
-
-    jobs.on_message(on_job)
+    # Acked receive: each job is handed over once, and the SDK replies {"ack": seq} to the
+    # sender when the handler returns. Plain messages on the channel use on_message.
+    jobs.on_acked(lambda sender, data: print("job from", sender, data))
     await robot.connect()
     print("online as", robot.robot_id)
 

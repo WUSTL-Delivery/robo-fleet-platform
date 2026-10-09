@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -20,7 +23,15 @@ from fleet import (
     StateChange,
 )
 
+from fleet.channel import ACKED_MEMORY_SECONDS, MAX_SEQ, _ack_seq, _acked_seq
+
 FAST = Backoff(initial=0.02, max=0.2)
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_FIXTURES = _REPO_ROOT / "protocol" / "fixtures" / "valid"
+#: Golden wire examples of the acked-send convention (protocol/README.md).
+ACKED_PUBLISH = json.loads((_FIXTURES / "channel-publish-acked.json").read_text())
+ACK_MESSAGE = json.loads((_FIXTURES / "channel-message-ack.json").read_text())
 
 
 def _chan_env(type_: str, payload: dict[str, Any], id_: str | None = None) -> str:
@@ -270,3 +281,304 @@ async def _chan_until(cond, timeout: float = 5.0) -> None:
         if time.monotonic() > deadline:
             raise AssertionError("condition not met in time")
         await asyncio.sleep(0.01)
+
+
+# -- acked receive (protocol/README.md, "Acked send (convention on channel data)", Receiver)
+
+
+class ChanAckedRobot:
+    """An SDK robot with an acked handler on one channel, and a service to send to it."""
+
+    def __init__(self, robot: ChanRecordingClient, svc: ChanRawService, channel: str) -> None:
+        self.robot, self.svc, self.channel = robot, svc, channel
+        self.handled: list[tuple[str, Any]] = []
+
+    async def send(self, seq: Any, data: Any = None, *, svc: ChanRawService | None = None, channel: str | None = None) -> None:
+        payload = {"channel": channel or self.channel, "to": self.robot.client_id, "data": {"seq": seq, "data": data}}
+        await (svc or self.svc).send("channel.publish", payload, f"acked-{seq}")
+
+    async def ack(self, timeout: float = 5.0, svc: ChanRawService | None = None) -> dict[str, Any]:
+        """The next channel.message payload the service gets."""
+        return (await (svc or self.svc).next("channel.message", timeout))["payload"]
+
+    async def no_message(self, wait: float = 0.3, svc: ChanRawService | None = None) -> None:
+        with pytest.raises(asyncio.TimeoutError):
+            await (svc or self.svc).next("channel.message", wait)
+
+    def acks_sent(self) -> list[dict[str, Any]]:
+        return [e["payload"] for e in self.robot.sent if e["type"] == "channel.publish"]
+
+
+async def _chan_acked(server, cleanup: list[Any], name: str, handler=None, channel: str = "commands") -> ChanAckedRobot:
+    robot = _chan_robot(server, cleanup, name)
+    await robot.connect()
+    svc = await _chan_service(server, cleanup)
+    pair = ChanAckedRobot(robot, svc, channel)
+
+    def record(sender: str, data: Any) -> None:
+        pair.handled.append((sender, data))
+
+    robot.channel(channel).on_acked(handler or record)
+    return pair
+
+
+def test_channel_acked_fixtures_have_the_reserved_shapes():
+    sent = ACKED_PUBLISH["payload"]
+    assert ACKED_PUBLISH["type"] == "channel.publish" and "to" in sent and "broadcast" not in sent
+    seq = _acked_seq(sent["data"])
+    assert seq == 1755100000001 and seq > 2**32
+    assert _ack_seq(sent["data"]) is None
+    back = ACK_MESSAGE["payload"]
+    assert ACK_MESSAGE["type"] == "channel.message"
+    assert _ack_seq(back["data"]) == seq and _acked_seq(back["data"]) is None
+    assert back["channel"] == sent["channel"] and back["from"] == sent["to"]
+
+
+def test_channel_acked_shapes_are_exact():
+    assert _acked_seq({"seq": 1, "data": None}) == 1  # null is a legal inner data
+    assert _acked_seq({"seq": MAX_SEQ, "data": [1]}) == MAX_SEQ == 9007199254740991
+    for plain in [
+        {"seq": 1},  # missing data
+        {"seq": 1, "data": {}, "extra": 0},
+        {"seq": 0, "data": {}},
+        {"seq": -1, "data": {}},
+        {"seq": MAX_SEQ + 1, "data": {}},
+        {"seq": "1", "data": {}},
+        {"seq": 1.5, "data": {}},
+        {"seq": True, "data": {}},
+        {"seq": None, "data": {}},
+        {"ack": 1},
+        [1, 2],
+        "seq",
+        None,
+    ]:
+        assert _acked_seq(plain) is None, plain
+    assert _ack_seq({"ack": 7}) == 7
+    for plain in [{"ack": 7, "seq": 7}, {"ack": 0}, {"ack": "7"}, {"ack": 7.5}, {"ack": False}, {"ack": MAX_SEQ + 1}, {}, 7]:
+        assert _ack_seq(plain) is None, plain
+
+
+async def test_channel_acked_fixture_roundtrip_first_delivery_and_resend(fleet_server, chan_cleanup):
+    pair = await _chan_acked(fleet_server, chan_cleanup, "chan-robot-ack")
+    robot, svc = pair.robot, pair.svc
+    seq = ACKED_PUBLISH["payload"]["data"]["seq"]
+    inner = ACKED_PUBLISH["payload"]["data"]["data"]
+    # The fixture as the sender puts it on the wire; only the target is this run's robot.
+    publish = {**ACKED_PUBLISH["payload"], "to": robot.client_id}
+    expected_ack = {**ACK_MESSAGE["payload"], "from": robot.client_id}
+
+    # First delivery: the handler gets the inner data (no seq), and the sender gets the ack fixture.
+    await svc.send("channel.publish", publish, ACKED_PUBLISH["id"])
+    assert await pair.ack() == expected_ack
+    assert pair.handled == [(svc.client_id, inner)]
+
+    # Re-sends (same seq, same data): acked every time, never handled again.
+    for copies in (2, 3):
+        await svc.send("channel.publish", publish, ACKED_PUBLISH["id"])
+        assert await pair.ack() == expected_ack
+        assert len(pair.acks_sent()) == copies
+    assert pair.handled == [(svc.client_id, inner)]
+
+    # What the robot put on the wire: one directed ack per copy received, nothing else.
+    assert pair.acks_sent() == [{"channel": "commands", "to": svc.client_id, "data": {"ack": seq}}] * 3
+    # on_acked needs no subscription: acked messages are directed.
+    assert not [e for e in robot.sent if e["type"] == "subscribe"]
+    await pair.no_message()  # acks are not re-sent on a timer
+
+
+async def test_channel_acked_handler_failure_sends_no_ack_and_resend_is_new(fleet_server, chan_cleanup):
+    calls: list[Any] = []
+
+    def flaky(sender: str, data: Any) -> None:
+        calls.append(data)
+        if len(calls) == 1:
+            raise RuntimeError("not ready")
+
+    pair = await _chan_acked(fleet_server, chan_cleanup, "chan-robot-ackfail", flaky)
+    await pair.send(41, {"op": "blink"})
+    await pair.no_message()  # failed: forgotten, no ack
+    assert calls == [{"op": "blink"}] and pair.acks_sent() == []
+
+    await pair.send(41, {"op": "blink"})  # the sender's next re-send is treated as new
+    assert (await pair.ack())["data"] == {"ack": 41}
+    assert calls == [{"op": "blink"}] * 2
+
+    await pair.send(41, {"op": "blink"})  # now done: acked, not handled
+    assert (await pair.ack())["data"] == {"ack": 41}
+    assert len(calls) == 2
+
+    # Same for a coroutine handler that raises.
+    async def boom(sender: str, data: Any) -> None:
+        calls.append("async")
+        raise RuntimeError("no")
+
+    pair.robot.channel("other").on_acked(boom)
+    await pair.send(41, None, channel="other")
+    await pair.no_message()
+    assert calls[-1] == "async" and len(pair.acks_sent()) == 2
+
+
+async def test_channel_acked_repeat_while_in_progress_is_dropped(fleet_server, chan_cleanup):
+    release = asyncio.Event()
+    started: list[Any] = []
+
+    async def slow(sender: str, data: Any) -> None:
+        started.append(data)
+        await release.wait()
+
+    pair = await _chan_acked(fleet_server, chan_cleanup, "chan-robot-ackslow", slow)
+    await pair.send(7, "job")
+    await _chan_until(lambda: started == ["job"])
+    await pair.send(7, "job")
+    await pair.send(7, "job")
+    await pair.no_message()  # in progress: repeats dropped, no ack yet
+    assert started == ["job"] and pair.acks_sent() == []
+
+    release.set()  # accepted: exactly one ack, for the first copy
+    assert (await pair.ack())["data"] == {"ack": 7}
+    await pair.no_message()
+    assert len(pair.acks_sent()) == 1
+
+    await pair.send(7, "job")  # done: ack again
+    assert (await pair.ack())["data"] == {"ack": 7}
+    assert started == ["job"]
+
+
+async def test_channel_acked_dedup_key_is_channel_sender_seq(fleet_server, chan_cleanup):
+    pair = await _chan_acked(fleet_server, chan_cleanup, "chan-robot-ackkey")
+    other_svc = await _chan_service(fleet_server, chan_cleanup)
+    elsewhere: list[Any] = []
+    pair.robot.channel("elsewhere").on_acked(lambda sender, data: elsewhere.append((sender, data)))
+    with pytest.raises(ValueError):
+        pair.robot.channel("elsewhere").on_acked(lambda sender, data: None)  # one per channel
+
+    await pair.send(5, "a")
+    assert (await pair.ack())["data"] == {"ack": 5}
+    await pair.send(5, "b", svc=other_svc)  # same seq, another sender: new
+    assert await pair.ack(svc=other_svc) == {"channel": "commands", "from": pair.robot.client_id, "data": {"ack": 5}}
+    await pair.send(5, "c", channel="elsewhere")  # same seq and sender, another channel: new
+    assert await pair.ack() == {"channel": "elsewhere", "from": pair.robot.client_id, "data": {"ack": 5}}
+    await pair.send(6, "d")  # another seq; gaps and order mean nothing
+    assert (await pair.ack())["data"] == {"ack": 6}
+
+    assert pair.handled == [(pair.svc.client_id, "a"), (other_svc.client_id, "b"), (pair.svc.client_id, "d")]
+    assert elsewhere == [(pair.svc.client_id, "c")]
+    await pair.no_message(0.2, svc=other_svc)  # acks go to the sender of that copy only
+
+
+async def test_channel_acked_and_ordinary_data_share_a_channel(fleet_server, chan_cleanup):
+    pair = await _chan_acked(fleet_server, chan_cleanup, "chan-robot-ackmix")
+    robot, svc = pair.robot, pair.svc
+    plain: list[Any] = []
+    robot.channel("commands").on_message(lambda sender, data: plain.append(data))
+
+    ordinary = [
+        {"seq": 1, "data": {}, "extra": True},
+        {"seq": 1},
+        {"seq": "1", "data": {}},
+        {"seq": 0, "data": {}},
+        {"seq": MAX_SEQ + 1, "data": {}},
+        {"seq": 1.5, "data": {}},
+        {"ack": 1},
+        "text",
+    ]
+    for data in ordinary:
+        await svc.send("channel.publish", {"channel": "commands", "to": robot.client_id, "data": data})
+    await pair.send(1, None)  # null inner data is legal
+    await pair.send(MAX_SEQ, {"k": "v"})
+    assert (await pair.ack())["data"] == {"ack": 1}
+    assert (await pair.ack())["data"] == {"ack": MAX_SEQ}
+
+    assert plain == ordinary  # handed over untouched, in order; acked messages not shown
+    assert pair.handled == [(svc.client_id, None), (svc.client_id, {"k": "v"})]
+    assert len(pair.acks_sent()) == 2
+
+    # Without an acked handler the reserved shape is plain data and nothing is acked.
+    seen: list[Any] = []
+    robot.channel("plain").on_message(lambda sender, data: seen.append(data))
+    await pair.send(9, "x", channel="plain")
+    await _chan_until(lambda: seen == [{"seq": 9, "data": "x"}])
+    await pair.no_message(0.2)
+
+
+async def test_channel_acked_done_key_is_remembered_for_ten_minutes(fleet_server, chan_cleanup):
+    assert ACKED_MEMORY_SECONDS == 600
+    pair = await _chan_acked(fleet_server, chan_cleanup, "chan-robot-ackmem")
+    hub = pair.robot._fleet_channel_hub
+    clock = [1000.0]
+    hub._now = lambda: clock[0]
+
+    await pair.send(1, "first")
+    assert (await pair.ack())["data"] == {"ack": 1}
+    clock[0] += 300
+    await pair.send(2, "second")
+    assert (await pair.ack())["data"] == {"ack": 2}
+
+    clock[0] = 1000.0 + ACKED_MEMORY_SECONDS  # ten minutes after seq 1 was first received
+    await pair.send(1, "first")
+    assert (await pair.ack())["data"] == {"ack": 1}
+    assert len(pair.handled) == 2 and len(hub._seen) == 2  # re-acking did not extend or drop it
+
+    clock[0] += 1  # past the memory: seq 1 forgotten (handled again), seq 2 still done
+    await pair.send(2, "second")
+    assert (await pair.ack())["data"] == {"ack": 2}
+    assert list(hub._seen) == [("commands", pair.svc.client_id, 2)]
+    await pair.send(1, "first")
+    assert (await pair.ack())["data"] == {"ack": 1}
+    assert [d for _, d in pair.handled] == ["first", "second", "first"]
+
+
+async def test_channel_acked_ack_to_a_sender_that_left_is_dropped(fleet_server, chan_cleanup):
+    release = asyncio.Event()
+    started: list[Any] = []
+
+    async def slow(sender: str, data: Any) -> None:
+        started.append(data)
+        await release.wait()
+
+    pair = await _chan_acked(fleet_server, chan_cleanup, "chan-robot-ackgone", slow)
+    errors: list[dict[str, Any]] = []
+    pair.robot.on("error", lambda env: errors.append(env["payload"]))
+    await pair.send(3, "job")
+    await _chan_until(lambda: started == ["job"])
+    await pair.svc.close()
+    await asyncio.sleep(0.1)  # let the server notice the sender is gone
+
+    release.set()
+    await _chan_until(lambda: len(pair.acks_sent()) == 1)
+    await _chan_until(lambda: [e["code"] for e in errors] == ["not_found"])
+    await asyncio.sleep(0.2)
+    assert len(pair.acks_sent()) == 1  # dropped, not retried
+    assert pair.robot.state is ConnectionState.OPEN
+
+
+async def test_channel_fake_robot_example_acks_through_the_helper(fleet_server, chan_cleanup, tmp_path):
+    """examples/fake_robot.py, as a process: a job sent as an acked message comes back {ack: seq}."""
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-u", str(_REPO_ROOT / "sdk" / "python" / "examples" / "fake_robot.py"),
+        "--url", fleet_server.ws_url, "--name", "chan-fake-robot", "--token-file", str(tmp_path / "token.json"), "--no-wander",
+        env={**os.environ, "FLEET_ENROLL_KEY": fleet_server.enroll_key},
+        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        robot_id = ""
+        while not robot_id:
+            line = (await asyncio.wait_for(proc.stdout.readline(), 15)).decode()
+            assert line, "fake_robot.py exited before coming online"
+            if " online as " in line:
+                robot_id = line.split(" online as ")[1].split()[0]
+        svc = await _chan_service(fleet_server, chan_cleanup)
+        seq = ACKED_PUBLISH["payload"]["data"]["seq"]
+        publish = {**ACKED_PUBLISH["payload"], "channel": "jobs", "to": robot_id}
+        expected = {**ACK_MESSAGE["payload"], "channel": "jobs", "from": robot_id}
+        for _ in range(2):  # the re-send is acked too
+            await svc.send("channel.publish", publish, ACKED_PUBLISH["id"])
+            assert (await svc.next("channel.message", channel="jobs"))["payload"] == expected
+        assert seq == expected["data"]["ack"]
+        printed = b""
+        while b"job from" not in printed:
+            printed = await asyncio.wait_for(proc.stdout.readline(), 5)
+        assert str(ACKED_PUBLISH["payload"]["data"]["data"]) in printed.decode()  # the inner data, once
+    finally:
+        proc.terminate()
+        await proc.wait()

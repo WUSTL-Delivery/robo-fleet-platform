@@ -6,11 +6,13 @@ docs/INTEGRATION.md for the wire protocol this package wraps.
 """
 
 from .channel import (
+    ACKED_MEMORY_SECONDS,
     CHANNEL_NAME_PATTERN,
     DEFAULT_NOT_FOUND_WINDOW,
     Channel,
     ChannelMessage,
     ChannelTargetNotFound,
+    MAX_SEQ,
 )
 from .client import (
     PROTOCOL_VERSION,
@@ -28,6 +30,7 @@ from .token_store import Credentials, FileTokenStore, MemoryTokenStore, TokenSto
 __version__ = "0.0.1"
 
 __all__ = [
+    "ACKED_MEMORY_SECONDS",
     "CHANNEL_NAME_PATTERN",
     "DEADMAN_MS",
     "DEFAULT_NOT_FOUND_WINDOW",
@@ -44,6 +47,7 @@ __all__ = [
     "FleetClient",
     "FleetClientError",
     "LeaseChange",
+    "MAX_SEQ",
     "MemoryTokenStore",
     "Robot",
     "StateChange",
