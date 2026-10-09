@@ -1,0 +1,6 @@
+{
+  "lease_id": "ls_7f8e9d0c",
+  "seq": 42,
+  "linear": { "x_mps": 0.5 },
+  "angular": { "z_radps": -0.3 }
+}
