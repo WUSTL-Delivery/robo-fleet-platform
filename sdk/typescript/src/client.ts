@@ -34,6 +34,8 @@
 //                                         who is watching which robot)
 //   client.onLayer(h)                     layer.declare / layer.update
 //   client.channel(name)                  publish / onMessage / subscribe (channel.ts)
+//   await client.iceServers()             STUN/TURN servers for a teleop peer
+//                                         connection (robots and operators)
 //
 // Topics are remembered. On EVERY (re)connect the client re-sends one
 // `subscribe` with all of them before any onState("open") handler runs, and
@@ -66,6 +68,8 @@ import type {
   ErrorPayload,
   EventName,
   HelpDetails,
+  IceConfigPayload,
+  IceServer,
   Lease,
   LeaseRevokedPayload,
   OperatorSummary,
@@ -240,6 +244,17 @@ export type LayerEnvelope = Envelope<"layer.declare"> | Envelope<"layer.update">
 
 type Waiter = { resolve: (s: SnapshotPayload) => void; reject: (e: Error) => void };
 
+export interface IceOptions {
+  /** How long to wait for the server's answer. Default 2000 ms. */
+  timeoutMs?: number;
+}
+
+type IceWaiter = {
+  resolve: (c: IceConfigPayload) => void;
+  reject: (e: FleetClientError) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
 export class FleetClient {
   readonly #opts: FleetClientOptions;
   readonly #store: TokenStore;
@@ -274,6 +289,10 @@ export class FleetClient {
   readonly #eventHandlers = new Map<string, Set<Handler<FleetEvent>>>(); // "*" = every event
   readonly #channelHandlers = new Map<string, Set<Handler<ChannelMessage>>>(); // "*" = every channel
   readonly #layerHandlers = new Set<Handler<LayerEnvelope>>();
+
+  #iceSeq = 0;
+  /** ice.request sends on the current socket still waiting for ice.config, by envelope id. */
+  readonly #iceWaiters = new Map<string, IceWaiter>();
 
   constructor(opts: FleetClientOptions) {
     this.#opts = opts;
@@ -454,6 +473,53 @@ export class FleetClient {
     return () => this.#layerHandlers.delete(handler);
   }
 
+  /**
+   * The ICE servers to give a teleop peer connection, in WebRTC's own shape:
+   *
+   *   new RTCPeerConnection({ iceServers: await client.iceServers() })
+   *
+   * It asks the server every time (`ice.request`), because the TURN credential
+   * in the answer is short-lived and minted for this client: call it right
+   * before creating each peer connection and do not keep the result. Robots
+   * and operators only.
+   *
+   * It never rejects. An installation with no ICE servers answers with an
+   * empty list, and so does every failure (not connected, no answer in time,
+   * a server too old to know the message, a refusal): a peer connection with
+   * no ICE servers still works on loopback and on one LAN, and teleop falls
+   * back to the bus when it does not. Use iceConfig() to see the failure.
+   */
+  iceServers(opts: IceOptions = {}): Promise<IceServer[]> {
+    return this.iceConfig(opts).then(
+      (c) => c.ice_servers,
+      () => [],
+    );
+  }
+
+  /**
+   * The whole `ice.config` answer: `ice_servers` plus `expires_at_ms`, after
+   * which its credentials must not be used for a new peer connection (absent
+   * when it carries none). Rejects with a FleetClientError when the client is
+   * not open ("closed"), no answer comes within `timeoutMs` ("timeout"), the
+   * connection drops first ("network"), or the server refuses: "not_authorized"
+   * for a service, "invalid_message" from a server that predates the message.
+   */
+  iceConfig(opts: IceOptions = {}): Promise<IceConfigPayload> {
+    return new Promise<IceConfigPayload>((resolve, reject) => {
+      const id = `ice-${++this.#iceSeq}`;
+      const timer = setTimeout(() => {
+        this.#iceWaiters.delete(id);
+        reject(new FleetClientError("timeout", "ice.request: no ice.config from the server"));
+      }, opts.timeoutMs ?? 2000);
+      this.#iceWaiters.set(id, { resolve, reject, timer });
+      try {
+        this.send("ice.request", {}, { id });
+      } catch (err) {
+        this.#settleIce(id)?.reject(asClientError(err));
+      }
+    });
+  }
+
   /** A typed view of one channel. Throws on an invalid channel name. */
   channel<T = unknown>(name: string): Channel<T> {
     return new Channel<T>(this, name);
@@ -467,9 +533,21 @@ export class FleetClient {
     ws.send(JSON.stringify(envelope("subscribe", { topics }, id)));
   }
 
-  /** Stream half of inbound dispatch: snapshots, subscribe errors, gated events. */
+  /** Takes a pending ice.request out of the table, stopping its timeout. */
+  #settleIce(id: string | undefined): IceWaiter | undefined {
+    const w = id === undefined ? undefined : this.#iceWaiters.get(id);
+    if (!w) return undefined;
+    this.#iceWaiters.delete(id!);
+    clearTimeout(w.timer);
+    return w;
+  }
+
+  /** Stream half of inbound dispatch: snapshots, replies to our requests, gated events. */
   #stream(env: AnyEnvelope): void {
     switch (env.type) {
+      case "ice.config":
+        this.#settleIce(env.payload.ref)?.resolve(env.payload);
+        return;
       case "snapshot": {
         const entry = this.#inflight.shift();
         this.#snapshot = env.payload;
@@ -479,6 +557,11 @@ export class FleetClient {
         return;
       }
       case "error": {
+        const ice = this.#settleIce(env.payload.ref);
+        if (ice) {
+          ice.reject(new FleetClientError(env.payload.code, `ice.request: ${env.payload.message}`));
+          return;
+        }
         const i = env.payload.ref === undefined ? -1 : this.#inflight.findIndex((e) => e.id === env.payload.ref);
         if (i < 0) return;
         const [entry] = this.#inflight.splice(i, 1);
@@ -530,8 +613,13 @@ export class FleetClient {
     }
   }
 
-  /** The socket that carried the in-flight subscribes is gone: they wait for the next connection. */
+  /** The socket that carried the in-flight requests is gone: subscribes wait for the next connection. */
   #onSocketLost(): void {
+    // An ice.request is not carried over: the caller asks again when it next
+    // needs a peer connection.
+    for (const id of [...this.#iceWaiters.keys()]) {
+      this.#settleIce(id)?.reject(new FleetClientError("network", "ice.request: connection lost before ice.config"));
+    }
     for (const e of this.#inflight) this.#deferred.push(...e.waiters);
     this.#inflight = [];
     this.#held = [];

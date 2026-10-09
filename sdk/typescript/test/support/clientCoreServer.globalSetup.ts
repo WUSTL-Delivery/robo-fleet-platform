@@ -17,6 +17,10 @@ export interface ClientCoreServer {
   enrollKey: string;
   adminToken: string;
   heartbeatIntervalMs: number;
+  /** ICE servers the server is configured with; nothing listens there, the SDK only has to be handed them. */
+  stunUrls: string[];
+  turnUrls: string[];
+  turnSecret: string;
 }
 
 declare module "vitest" {
@@ -68,6 +72,9 @@ export default async function setup(project: TestProject): Promise<() => Promise
     adminToken: "sdk-client-core-admin-token-0123456789",
     // Short so a test can outlast several intervals and prove heartbeats keep it alive.
     heartbeatIntervalMs: 200,
+    stunUrls: ["stun:127.0.0.1:3478"],
+    turnUrls: ["turn:127.0.0.1:3478?transport=udp", "turn:127.0.0.1:3478?transport=tcp"],
+    turnSecret: "sdk-client-core-turn-secret-0123456789",
   };
 
   let log = "";
@@ -82,6 +89,10 @@ export default async function setup(project: TestProject): Promise<() => Promise
       FLEET_BOOTSTRAP_FLEET: cfg.fleet,
       FLEET_BOOTSTRAP_ENROLL_KEY: cfg.enrollKey,
       FLEET_ADMIN_TOKEN: cfg.adminToken,
+      FLEET_STUN_URLS: cfg.stunUrls.join(","),
+      FLEET_TURN_URLS: cfg.turnUrls.join(","),
+      FLEET_TURN_SECRET: cfg.turnSecret,
+      FLEET_TURN_CREDENTIAL_TTL_S: "600",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

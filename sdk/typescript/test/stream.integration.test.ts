@@ -2,6 +2,7 @@
 // (started by test/support/clientCoreServer.globalSetup.ts). The first test is
 // the command-brain half of the server's TestIntegrationStoryline
 // (server/internal/app/integration_test.go), driven only through the SDK.
+import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, inject, it } from "vitest";
 import {
   FleetClient,
@@ -103,6 +104,50 @@ interface Assignment {
   order_id?: number;
   ack?: number;
 }
+
+describe("ICE servers from fleet-server", () => {
+  it("hands a robot and an operator the configured servers with their own TURN credential", async () => {
+    const robot = makeClient({ kind: "robot", name: "ice-bot", enrollmentKey: server.enrollKey });
+    const robotId = (await robot.connect()).client_id;
+    const op = makeClient({ kind: "operator", name: "ice-op", enrollmentKey: await mintOperatorInvite() });
+    const opId = (await op.connect()).client_id;
+
+    for (const [client, id] of [[robot, robotId], [op, opId]] as const) {
+      const before = Date.now();
+      const config = await client.iceConfig();
+      // The shape RTCPeerConnection takes, entry for entry.
+      expect(config.ice_servers).toEqual([
+        { urls: server.stunUrls },
+        { urls: server.turnUrls, username: expect.any(String), credential: expect.any(String) },
+      ]);
+      const turn = config.ice_servers[1]!;
+      // Time-limited shared-secret scheme: "<expiry>:<client id>" signed with the server's secret.
+      const [expiry, identity] = turn.username!.split(":");
+      expect(identity).toBe(id);
+      expect(Number(expiry) * 1000).toBe(config.expires_at_ms);
+      expect(config.expires_at_ms!).toBeGreaterThan(before + 590_000);
+      expect(config.expires_at_ms!).toBeLessThan(Date.now() + 660_000);
+      expect(turn.credential).toBe(createHmac("sha1", server.turnSecret).update(turn.username!).digest("base64"));
+      expect(JSON.stringify(config)).not.toContain(server.turnSecret);
+      // iceServers() is the same list, ready for RTCConfiguration.iceServers.
+      const servers = await client.iceServers();
+      expect(servers.map((s) => s.urls)).toEqual([server.stunUrls, server.turnUrls]);
+    }
+  });
+
+  it("gives a service no credentials, and an empty list whenever there is no answer", async () => {
+    const svc = makeClient({ kind: "service", name: "ice-svc", enrollmentKey: server.enrollKey });
+    // Not connected yet.
+    await expect(svc.iceConfig()).rejects.toMatchObject({ code: "closed" });
+    expect(await svc.iceServers()).toEqual([]);
+    await svc.connect();
+    await expect(svc.iceConfig()).rejects.toMatchObject({ code: "not_authorized" });
+    expect(await svc.iceServers()).toEqual([]);
+    // The refusal was a reply, not the end of the connection.
+    expect(svc.state).toBe("open");
+    await svc.subscribe(["presence"]);
+  });
+});
 
 describe("subscribe, events and channels against fleet-server", () => {
   it("runs the brain half of the storyline through the SDK", async () => {
