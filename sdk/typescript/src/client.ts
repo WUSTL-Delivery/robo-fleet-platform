@@ -64,6 +64,7 @@ import type {
   HelpDetails,
   Lease,
   LeaseRevokedPayload,
+  OperatorSummary,
   SnapshotPayload,
   TelemetryPayload,
   WelcomePayload,
@@ -182,6 +183,13 @@ export interface FleetEventData {
   "robot.lease_released": LeaseRevokedPayload;
   /** Expiry, steal, or operator loss. `help` is set when the robot went back to HELP_REQUESTED. */
   "robot.lease_revoked": LeaseRevokedPayload;
+  /**
+   * The operator's entry as of the event (online: true), the same object
+   * `snapshot.operators` lists. Upsert it by operator_id.
+   */
+  "operator.online": OperatorSummary;
+  /** The operator's entry with online: false. */
+  "operator.offline": OperatorSummary;
 }
 
 // Compile-time guard: FleetEventData covers exactly the protocol's event names.
@@ -189,18 +197,28 @@ type Exactly<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
 const _eventNamesCovered: Exactly<keyof FleetEventData, EventName> = true;
 void _eventNamesCovered;
 
-/** One `event` envelope, narrowed by its name. */
+/** The events about an operator. On the wire they carry `operator_id` and no `robot_id`. */
+export type OperatorEventName = Extract<EventName, `operator.${string}`>;
+
+/**
+ * One `event` envelope, narrowed by its name. Narrow on `event` before using
+ * `robot_id` in a handler that receives every event: operator.* events are not
+ * about a robot.
+ */
 export type FleetEvent<N extends EventName = EventName> = {
   [K in N]: {
     event: K;
+    /** The robot the event is about; "" on operator.* events, which have `operator_id` instead. */
     robot_id: string;
     data: FleetEventData[K];
     /** Server send time of the envelope, when present. */
     ts_ms?: number;
-  };
+  } & (K extends OperatorEventName ? { /** The operator the event is about. */ operator_id: string } : unknown);
 }[N];
 
+/** Robot presence only; operators arrive as OperatorPresenceEvent. */
 export type PresenceEvent = FleetEvent<"robot.online" | "robot.offline">;
+export type OperatorPresenceEvent = FleetEvent<"operator.online" | "operator.offline">;
 export type TelemetryEvent = FleetEvent<"robot.telemetry">;
 
 /** layer.declare / layer.update envelopes, as delivered to `layers` subscribers. */
@@ -375,7 +393,10 @@ export class FleetClient {
     return addTo(this.#eventHandlers, key, handler);
   }
 
-  /** robot.online / robot.offline (topic "presence"). */
+  /**
+   * robot.online / robot.offline (topic "presence"). Operator presence rides
+   * the same topic; take it with onEvent("operator.online" | "operator.offline").
+   */
   onPresence(handler: Handler<PresenceEvent>): () => void {
     const offOn = this.onEvent("robot.online", handler);
     const offOff = this.onEvent("robot.offline", handler);
@@ -457,7 +478,9 @@ export class FleetClient {
   #deliver(env: AnyEnvelope): void {
     if (env.type === "event") {
       const p = env.payload;
-      const ev = { event: p.event, robot_id: p.robot_id ?? "", data: p.data } as FleetEvent;
+      const fields: Record<string, unknown> = { event: p.event, robot_id: p.robot_id ?? "", data: p.data };
+      if (p.operator_id !== undefined) fields.operator_id = p.operator_id;
+      const ev = fields as FleetEvent;
       if (env.ts_ms !== undefined) ev.ts_ms = env.ts_ms;
       for (const key of [p.event, "*"]) {
         const set = this.#eventHandlers.get(key);

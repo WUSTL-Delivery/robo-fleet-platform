@@ -1,0 +1,10 @@
+{
+  "v": 0,
+  "type": "snapshot",
+  "payload": {
+    "robots": [],
+    "operators": [
+      { "operator_id": "o_9c8d7e6f", "name": "ada" }
+    ]
+  }
+}

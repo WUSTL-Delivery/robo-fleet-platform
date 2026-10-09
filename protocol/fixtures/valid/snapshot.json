@@ -23,6 +23,10 @@
         "presence": "offline",
         "state": "AUTONOMOUS"
       }
+    ],
+    "operators": [
+      { "operator_id": "o_9c8d7e6f", "name": "ada", "online": true },
+      { "operator_id": "o_2b3c4d5e", "online": false }
     ]
   }
 }
