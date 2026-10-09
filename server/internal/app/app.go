@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"fleetplatform/sdk/go/protocol"
 	"fleetplatform/server/internal/bus"
@@ -32,6 +33,9 @@ type Config struct {
 
 // DefaultLayerTTL keeps a service's layers across a restart or a Wi-Fi blip.
 const DefaultLayerTTL = 5 * time.Minute
+
+// maxHelpReasonLen mirrors help.request's reason maxLength in the schema.
+const maxHelpReasonLen = 256
 
 type App struct {
 	cfg Config
@@ -227,9 +231,20 @@ func (a *App) OnMessage(c *gateway.Conn, env protocol.Envelope) {
 		if !require(c, env, kind == store.KindRobot) {
 			return
 		}
-		if a.ops.RequestHelp(c.Client.ID) {
+		var req protocol.HelpRequest
+		if !parse(c, env, &req) {
+			return
+		}
+		// The reason is replayed in snapshots, so hold it to the schema's bounds.
+		if n := utf8.RuneCountInString(req.Reason); n < 1 || n > maxHelpReasonLen {
+			c.Send(errMsg(protocol.ErrInvalidMessage, "help.request reason must be 1 to 256 characters", env.ID))
+			return
+		}
+		// The event carries the stored entry (the request plus requested_at_ms),
+		// so a live subscriber can order the queue without a fresh snapshot.
+		if help := a.ops.RequestHelp(c.Client.ID, req.Reason, req.Context); help != nil {
 			a.emit(c.Client.FleetID, bus.TopicEvents, protocol.Event{
-				Event: protocol.EventRobotHelpRequested, RobotID: c.Client.ID, Data: env.Payload,
+				Event: protocol.EventRobotHelpRequested, RobotID: c.Client.ID, Data: mustJSON(help.Proto()),
 			})
 		}
 
@@ -468,19 +483,34 @@ func (a *App) snapshot(fleetID string) protocol.Snapshot {
 			sum.Presence = "online"
 			sum.Manifest = e.Manifest
 		}
-		state, lease := a.ops.StateOf(r.ID)
+		state, lease, help := a.ops.StateOf(r.ID)
 		sum.State = state
 		if lease != nil {
 			lp := lease.Proto()
 			sum.Lease = &lp
+		}
+		if help != nil {
+			hp := help.Proto()
+			sum.Help = &hp
 		}
 		snap.Robots = append(snap.Robots, sum)
 	}
 	return snap
 }
 
+// revokedMsg is the wire form of a revocation; it carries the queue entry when
+// the robot went back to HELP_REQUESTED.
+func revokedMsg(rv ops.Revoked) protocol.LeaseRevoked {
+	m := protocol.LeaseRevoked{LeaseID: rv.Lease.ID, RobotID: rv.Lease.RobotID, Reason: rv.Reason}
+	if rv.Help != nil {
+		hp := rv.Help.Proto()
+		m.Help = &hp
+	}
+	return m
+}
+
 func (a *App) notifyRevoked(rv ops.Revoked) {
-	revoked := protocol.LeaseRevoked{LeaseID: rv.Lease.ID, RobotID: rv.Lease.RobotID, Reason: rv.Reason}
+	revoked := revokedMsg(rv)
 	if rc := a.conn(rv.Lease.RobotID); rc != nil {
 		rc.Send(protocol.Msg(protocol.TypeLeaseRevoked, revoked))
 		a.emit(rc.Client.FleetID, bus.TopicEvents, protocol.Event{
@@ -492,9 +522,7 @@ func (a *App) notifyRevoked(rv ops.Revoked) {
 
 func (a *App) notifyOperator(operatorID string, rv ops.Revoked) {
 	if oc := a.conn(operatorID); oc != nil {
-		oc.Send(protocol.Msg(protocol.TypeLeaseRevoked, protocol.LeaseRevoked{
-			LeaseID: rv.Lease.ID, RobotID: rv.Lease.RobotID, Reason: rv.Reason,
-		}))
+		oc.Send(protocol.Msg(protocol.TypeLeaseRevoked, revokedMsg(rv)))
 	}
 }
 
