@@ -16,7 +16,8 @@ FROM golang:${GO_VERSION} AS go
 
 FROM ros:${ROS_DISTRO}-ros-base
 
-# ros-base already carries rclpy, sensor_msgs, launch and colcon; they are listed
+# ros-base already carries rclpy, the message packages, the interface generators
+# (fleet_agent_msgs), launch and colcon; they are listed
 # anyway so the image does not depend on what that metapackage happens to include.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-pip \
@@ -26,6 +27,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-${ROS_DISTRO}-sensor-msgs \
       ros-${ROS_DISTRO}-geometry-msgs \
       ros-${ROS_DISTRO}-std-msgs \
+      ros-${ROS_DISTRO}-builtin-interfaces \
+      ros-${ROS_DISTRO}-ament-cmake \
+      ros-${ROS_DISTRO}-rosidl-default-generators \
+      ros-${ROS_DISTRO}-rosidl-default-runtime \
       ros-${ROS_DISTRO}-launch \
       ros-${ROS_DISTRO}-launch-ros \
       ros-${ROS_DISTRO}-launch-testing \
