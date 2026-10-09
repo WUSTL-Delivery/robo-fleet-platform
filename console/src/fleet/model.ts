@@ -3,10 +3,11 @@
 // State is a pure reducer over two inputs: a `snapshot` (on every subscribe,
 // including after each reconnect) and the `event` envelopes that follow it.
 // The snapshot is authoritative for membership, presence, FSM state, manifest
-// and lease; it carries no telemetry, so the last telemetry is kept across a
+// lease and the open help request; it carries no telemetry, so the last telemetry is kept across a
 // snapshot for robots that are still online and dropped for the rest.
 import type {
   FleetEvent,
+  HelpDetails,
   Lease,
   Manifest,
   Pose,
@@ -24,6 +25,11 @@ export interface RobotView {
   state: RobotState;
   manifest?: Manifest;
   lease?: Lease;
+  /**
+   * The open help request, while the robot is HELP_REQUESTED: what it asked
+   * for and when it entered the queue (server clock). See fleet/queue.ts.
+   */
+  help?: HelpDetails;
   /** Latest telemetry payload, verbatim. */
   telemetry?: TelemetryPayload;
   /** Local receive time of `telemetry` (ms since epoch). */
@@ -72,6 +78,7 @@ function fromSummary(s: RobotSummary): RobotView {
   if (s.name !== undefined) v.name = s.name;
   if (s.manifest !== undefined) v.manifest = s.manifest;
   if (s.lease !== undefined) v.lease = s.lease;
+  if (s.state === "HELP_REQUESTED" && isHelp(s.help)) v.help = s.help;
   return v;
 }
 
@@ -97,26 +104,42 @@ function applyEvent(old: RobotView | undefined, event: FleetEvent, atMs: number)
       return r;
     case "robot.help_requested":
       r.state = "HELP_REQUESTED";
+      if (isHelp(event.data)) r.help = event.data;
+      else delete r.help;
       return r;
     case "robot.lease_granted":
+      // A claim closes the queue entry for everyone watching.
       r.state = "TELEOP";
       r.lease = event.data;
+      delete r.help;
       return r;
     case "robot.lease_released":
       if (r.lease && r.lease.lease_id !== event.data.lease_id) return undefined;
       delete r.lease;
+      delete r.help;
       r.state = "AUTONOMOUS";
       return r;
     case "robot.lease_revoked":
       if (r.lease && r.lease.lease_id !== event.data.lease_id) return undefined;
       delete r.lease;
-      // Expiry and operator loss put the robot back in the queue; a steal is
-      // followed by lease_granted for the new holder.
-      if (event.data.reason !== "stolen") r.state = "HELP_REQUESTED";
+      // A steal leaves the robot in TELEOP and is followed by lease_granted
+      // for the new holder. Expiry and operator loss put it back in the queue
+      // with the entry the server kept (original reason and request time).
+      if (event.data.reason === "stolen") return r;
+      r.state = "HELP_REQUESTED";
+      if (isHelp(event.data.help)) r.help = event.data.help;
+      else delete r.help;
       return r;
     default:
       return undefined;
   }
+}
+
+/** The wire is typed, but a queue ordered by a missing time would be wrong for everyone. */
+function isHelp(h: unknown): h is HelpDetails {
+  if (typeof h !== "object" || h === null) return false;
+  const d = h as Partial<HelpDetails>;
+  return typeof d.reason === "string" && typeof d.requested_at_ms === "number" && Number.isFinite(d.requested_at_ms);
 }
 
 /** Robots in display order: online first, then by name. */

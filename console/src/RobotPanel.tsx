@@ -10,10 +10,12 @@ interface Props {
   /** This console's operator id (welcome.client_id), to tell our lease from others'. */
   operatorId: string | undefined;
   robot: RobotView | undefined;
+  /** Passed through to the teleop section: a claim asked for from the help queue. */
+  claimSeq?: number;
   onClose: () => void;
 }
 
-export function RobotPanel({ client, operatorId, robot, onClose }: Props) {
+export function RobotPanel({ client, operatorId, robot, claimSeq, onClose }: Props) {
   if (!robot) {
     return (
       <aside className="robot-panel empty" aria-label="Robot detail">
@@ -50,7 +52,7 @@ export function RobotPanel({ client, operatorId, robot, onClose }: Props) {
           </>
         )}
       </dl>
-      <CapabilitySections client={client} robot={robot} operatorId={operatorId} />
+      <CapabilitySections client={client} robot={robot} operatorId={operatorId} claimSeq={claimSeq} />
     </aside>
   );
 }

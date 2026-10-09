@@ -12,6 +12,16 @@ export interface SectionProps {
   robot: RobotView;
   /** This console's operator id (welcome.client_id). */
   operatorId: string | undefined;
+  /**
+   * Set when the operator asked to claim this robot from outside the detail
+   * pane (the help queue). A new number is a new request; see TeleopPanel.
+   */
+  claimSeq?: number;
+}
+
+/** True when the manifest declares a drive this console has a widget for. */
+export function canTeleop(robot: RobotView): boolean {
+  return robot.manifest?.drive?.type === "twist";
 }
 
 interface CapabilitySection {
@@ -25,8 +35,14 @@ const SECTIONS: CapabilitySection[] = [
     key: "drive",
     // The drive contract type picks the widget; twist is the only one so far.
     render: (p) =>
-      p.robot.manifest?.drive?.type === "twist" ? (
-        <TeleopPanel key={p.robot.robot_id} client={p.client} robot={p.robot} operatorId={p.operatorId} />
+      canTeleop(p.robot) ? (
+        <TeleopPanel
+          key={p.robot.robot_id}
+          client={p.client}
+          robot={p.robot}
+          operatorId={p.operatorId}
+          claimSeq={p.claimSeq}
+        />
       ) : null,
   },
   { key: "cameras", render: (p) => <CamerasSection {...p} /> },
