@@ -122,6 +122,22 @@
       "required": ["operator_id", "online"],
       "additionalProperties": false
     },
+    "iceServer": {
+      "description": "One STUN or TURN server in the shape of WebRTC's RTCIceServer, so it can be passed to a peer connection unchanged. The three field names are WebRTC's, not this protocol's.",
+      "type": "object",
+      "properties": {
+        "urls": {
+          "description": "stun:, stuns:, turn: or turns: URLs of one server. Always an array.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        },
+        "username": { "type": "string", "minLength": 1 },
+        "credential": { "type": "string", "minLength": 1 }
+      },
+      "required": ["urls"],
+      "additionalProperties": false
+    },
     "channelName": {
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"

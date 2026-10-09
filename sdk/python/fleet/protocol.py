@@ -120,6 +120,39 @@ SignalPayload = TypedDict(
 )
 
 
+class IceRequestPayload(TypedDict):
+    """Asks the server for the ICE servers to give a peer connection. Robots and operators only. The reply is ice.config.
+
+    Source: `protocol/schemas/bus.schema.json#/$defs/ice.request`
+    """
+
+
+class IceServer(TypedDict):
+    """One STUN or TURN server in the shape of WebRTC's RTCIceServer, so it can be passed to a peer connection unchanged. The three field names are WebRTC's, not this protocol's.
+
+    Source: `protocol/schemas/defs.schema.json#/$defs/iceServer`
+    """
+
+    #: stun:, stuns:, turn: or turns: URLs of one server. Always an array.
+    urls: list[str]
+    username: NotRequired[str]
+    credential: NotRequired[str]
+
+
+class IceConfigPayload(TypedDict):
+    """The reply to ice.request: the ICE servers this installation is configured with, with TURN credentials minted for the asking client.
+
+    Source: `protocol/schemas/bus.schema.json#/$defs/ice.config`
+    """
+
+    #: Pass as RTCConfiguration.iceServers. Empty when the installation has none configured.
+    ice_servers: list[IceServer]
+    #: Epoch milliseconds, server clock, after which the credentials in ice_servers are refused for a new allocation. Absent when no entry carries credentials.
+    expires_at_ms: NotRequired[int]
+    #: The envelope id of the ice.request this answers; absent when the request had none.
+    ref: NotRequired[str]
+
+
 class LayerDeclarePayload(TypedDict):
     """Source: `protocol/schemas/bus.schema.json#/$defs/layer.declare`"""
 
@@ -413,6 +446,8 @@ MessageType = Literal[
     "channel.publish",
     "channel.message",
     "signal",
+    "ice.request",
+    "ice.config",
     "layer.declare",
     "layer.update",
     "error",
@@ -441,6 +476,8 @@ MESSAGE_TYPES: Final[tuple[MessageType, ...]] = (
     "channel.publish",
     "channel.message",
     "signal",
+    "ice.request",
+    "ice.config",
     "layer.declare",
     "layer.update",
     "error",
@@ -469,6 +506,8 @@ PAYLOAD_TYPES: Final[dict[str, Any]] = {
     "channel.publish": ChannelPublishPayload,
     "channel.message": ChannelMessagePayload,
     "signal": SignalPayload,
+    "ice.request": IceRequestPayload,
+    "ice.config": IceConfigPayload,
     "layer.declare": LayerDeclarePayload,
     "layer.update": LayerUpdatePayload,
     "error": ErrorPayload,

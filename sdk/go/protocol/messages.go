@@ -36,6 +36,8 @@ const (
 	TypeChannelPublish = "channel.publish"
 	TypeChannelMessage = "channel.message"
 	TypeSignal         = "signal"
+	TypeIceRequest     = "ice.request"
+	TypeIceConfig      = "ice.config"
 	TypeLayerDeclare   = "layer.declare"
 	TypeLayerUpdate    = "layer.update"
 	TypeError          = "error"
@@ -308,6 +310,27 @@ type Signal struct {
 	From string          `json:"from,omitempty"`
 	Kind string          `json:"kind"`
 	Data json.RawMessage `json:"data"`
+}
+
+// IceRequest asks for the installation's ICE servers. It has no fields.
+type IceRequest struct{}
+
+// IceServer is one STUN or TURN server in the shape of WebRTC's RTCIceServer.
+type IceServer struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username,omitempty"`
+	Credential string   `json:"credential,omitempty"`
+}
+
+// IceConfig answers IceRequest. A sender must set IceServers non-nil: the
+// schema wants an array, and nil marshals as null.
+type IceConfig struct {
+	IceServers []IceServer `json:"ice_servers"`
+	// ExpiresAtMs is when the credentials stop being accepted for a new
+	// allocation (server clock); zero when no entry carries credentials.
+	ExpiresAtMs int64 `json:"expires_at_ms,omitempty"`
+	// Ref is the envelope id of the request this answers.
+	Ref string `json:"ref,omitempty"`
 }
 
 type LayerDeclare struct {

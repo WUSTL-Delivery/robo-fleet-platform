@@ -1,0 +1,7 @@
+{
+  "v": 0,
+  "type": "ice.config",
+  "payload": {
+    "ice_servers": [{ "urls": "stun:turn.example.org:3478" }]
+  }
+}

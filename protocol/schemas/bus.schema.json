@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://fleetplatform.local/v0/bus.schema.json",
-  "title": "Opaque domain channels, WebRTC signaling, map layers",
+  "title": "Opaque domain channels, WebRTC signaling and ICE servers, map layers",
   "$defs": {
     "channel.publish": {
       "type": "object",
@@ -38,6 +38,33 @@
         "data": true
       },
       "required": ["kind", "data"],
+      "additionalProperties": false
+    },
+    "ice.request": {
+      "type": "object",
+      "description": "Asks the server for the ICE servers to give a peer connection. Robots and operators only. The reply is ice.config.",
+      "additionalProperties": false
+    },
+    "ice.config": {
+      "type": "object",
+      "description": "The reply to ice.request: the ICE servers this installation is configured with, with TURN credentials minted for the asking client.",
+      "properties": {
+        "ice_servers": {
+          "description": "Pass as RTCConfiguration.iceServers. Empty when the installation has none configured.",
+          "type": "array",
+          "items": { "$ref": "defs.schema.json#/$defs/iceServer" }
+        },
+        "expires_at_ms": {
+          "description": "Epoch milliseconds, server clock, after which the credentials in ice_servers are refused for a new allocation. Absent when no entry carries credentials.",
+          "type": "integer"
+        },
+        "ref": {
+          "description": "The envelope id of the ice.request this answers; absent when the request had none.",
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": ["ice_servers"],
       "additionalProperties": false
     },
     "layer.declare": {

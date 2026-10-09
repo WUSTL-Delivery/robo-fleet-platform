@@ -1,0 +1,5 @@
+{
+  "v": 0,
+  "type": "ice.config",
+  "payload": { "ice_servers": [] }
+}
