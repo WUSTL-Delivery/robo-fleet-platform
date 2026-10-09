@@ -1,0 +1,9 @@
+{
+  "v": 0,
+  "type": "channel.message",
+  "payload": {
+    "channel": "commands",
+    "from": "r_1a2b3c4d",
+    "data": { "ack": 1755100000001 }
+  }
+}

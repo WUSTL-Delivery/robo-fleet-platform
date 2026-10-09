@@ -1,0 +1,10 @@
+{
+  "v": 0,
+  "type": "channel.publish",
+  "id": "acked-1755100000001",
+  "payload": {
+    "channel": "commands",
+    "to": "r_1a2b3c4d",
+    "data": { "seq": 1755100000001, "data": { "op": "blink", "times": 3 } }
+  }
+}
