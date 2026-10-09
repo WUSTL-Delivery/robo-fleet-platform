@@ -98,11 +98,92 @@ valid twist (fake clock), twist rejected without current lease id.
 
 ## 5. E2E / demo verification
 
-- `docker compose up` + sim fleet + console: the 10-minute-stranger test, run by hand
-  before every milestone (later: Playwright driving the console for claim → WASD →
-  handback).
+- The two-operator demo below: the 10-minute-stranger test, run by hand before every
+  milestone (later: Playwright driving the console for claim → WASD → handback).
 - Teleop latency budget (<200ms glass-to-glass) is measured, not unit-tested: timestamp
   overlay in the video + datachannel echo timing, once real WebRTC media exists.
+
+### The two-operator demo
+
+Two people share one help queue for a fleet of 20 simulated robots. It needs no hardware
+and no accounts. From a fresh clone to both people driving takes a few minutes; the build
+itself took 21 seconds on a laptop with nothing cached.
+
+You need Go 1.26 or newer, Node 20 or newer (with npm), and curl. The script checks for
+them and says which one is missing.
+
+```bash
+git clone <this repo> fleet-platform && cd fleet-platform
+./scripts/demo.sh
+```
+
+The script builds the console into `fleet-server`, starts the server on a throwaway
+database, creates a fleet and two operator invites, and starts the sim robots. It then
+prints the console URL and the two invite keys, and keeps running:
+
+```
+Ready in 21s: 20 sim robots are online and will start asking for help.
+
+  Console:  http://localhost:8090/
+
+  Operator invites (each works once; paste one on the sign-in screen):
+    operator 1:  fp-oi-...
+    operator 2:  fp-oi-...
+```
+
+Ctrl-C stops the server and the sim and deletes the database. The port is the first free
+one from 8090, so a `fleet-server` you already run on 8080 is not touched; use the URL the
+script prints. `./scripts/demo.sh --help` lists the options (`--port`, `--count`,
+`--help-rate`, `--operators`, `--lan`, `--keep`).
+
+**Two operators need two sign-ins.** The console keeps its operator token in the browser,
+per address, so two tabs of one browser profile are the same operator. Pick one:
+
+- Two people on one network: start with `./scripts/demo.sh --lan`. The second person opens
+  the second URL the script prints (this machine's network address).
+- One person, two windows: use two browser profiles, or a normal window and a private one.
+- One person, one profile: open `http://localhost:8090/` in one tab and
+  `http://127.0.0.1:8090/` in another. The browser treats them as different sites, so each
+  signs in separately.
+
+Then follow the steps. The names `alice` and `bob` are whatever each person types at
+sign-in.
+
+1. **Sign in.** Each person opens the console URL, pastes one invite key, types a name,
+   and presses **Redeem invite**. Each sees the map with 20 robots, the **Robots** list
+   (`20 online / 20`), and both names in the bar at the top, their own marked `(you)`.
+2. **Watch the queue fill.** Within a minute or so a robot asks for help. Both people see
+   the same entry appear under **Help queue**: the robot's name, why it asked
+   (`low_confidence`, `path_blocked` or `localization_degraded`), and how long it has
+   waited. The longest wait is at the top. The robot turns amber on the map.
+3. **Alice claims and drives.** Alice presses **Claim** on the first entry. Her right-hand
+   pane shows `You have control. Hold W A S D to drive.` and the entry leaves the queue on
+   both screens. Bob's top bar shows `alice driving sim-NN`. Alice holds **W**: `Command`
+   shows a speed and the robot moves on both maps.
+4. **Check the link.** In Alice's pane, `Link` reads `Direct (WebRTC)` with a round-trip
+   time in milliseconds. Her drive commands go straight to the robot, not through the
+   server. If it reads `Server relay`, driving still works; the commands take the slower
+   path through the server.
+5. **Bob spectates.** Bob clicks `driving sim-NN` next to Alice's name. His pane shows
+   `alice is driving. You are watching read-only.` with the robot's live speed, and no
+   drive keys. Alice's pane lists Bob under `Watching`.
+6. **Bob steals.** Bob presses **Take control from alice**. He now has the drive keys.
+   Alice's pane changes to `bob is driving. You are watching read-only.` with the note
+   `bob took control from you.`
+7. **Hand back.** Bob presses **Hand back**. The robot's state returns to `AUTONOMOUS`
+   and it drives itself again. It may ask for help again later.
+8. **Race for one robot.** Both people press **Claim** on the same queue entry at the same
+   moment. One gets control. The other sees `alice claimed it first.` (with the winner's
+   name) and is left watching read-only, still connected. Exactly one person drives.
+
+What to do if a step does not match:
+
+| You see | Cause |
+|---|---|
+| `port N is already in use` | you passed `--port` for a port that is taken; leave it off |
+| The second window is already signed in as the first person | both windows share one browser profile and one address; see the three options above |
+| `Help queue` stays empty for minutes | chance; raise the rate with `--help-rate 0.5` |
+| An invite is refused | each invite works once; restart the script, or pass `--operators 4` for spares |
 
 ## CI shape (when wired)
 
