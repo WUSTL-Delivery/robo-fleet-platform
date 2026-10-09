@@ -30,6 +30,8 @@
 //   client.onSnapshot(h)                  every snapshot, including reconnects
 //   client.onEvent(h) / onEvent(name, h)  `event` envelopes, data typed per name
 //   client.onPresence(h) / onTelemetry(h) shorthands for the common event names
+//   client.onOperator(h)                  every operator.* event (who is online,
+//                                         who is watching which robot)
 //   client.onLayer(h)                     layer.declare / layer.update
 //   client.channel(name)                  publish / onMessage / subscribe (channel.ts)
 //
@@ -190,8 +192,13 @@ export interface FleetEventData {
    * `snapshot.operators` lists. Upsert it by operator_id.
    */
   "operator.online": OperatorSummary;
-  /** The operator's entry with online: false. */
+  /** The operator's entry with online: false (and so no `watching`). */
   "operator.offline": OperatorSummary;
+  /**
+   * The operator's entry after it sent `watch`: `watching` is the robot id, or
+   * is absent when the operator now watches none.
+   */
+  "operator.watching": OperatorSummary;
 }
 
 // Compile-time guard: FleetEventData covers exactly the protocol's event names.
@@ -221,6 +228,11 @@ export type FleetEvent<N extends EventName = EventName> = {
 /** Robot presence only; operators arrive as OperatorPresenceEvent. */
 export type PresenceEvent = FleetEvent<"robot.online" | "robot.offline">;
 export type OperatorPresenceEvent = FleetEvent<"operator.online" | "operator.offline">;
+/**
+ * Every operator.* event. Each carries the operator's whole entry as `data`,
+ * so one handler can upsert it by operator_id whatever the event name.
+ */
+export type OperatorEvent = FleetEvent<OperatorEventName>;
 export type TelemetryEvent = FleetEvent<"robot.telemetry">;
 
 /** layer.declare / layer.update envelopes, as delivered to `layers` subscribers. */
@@ -397,7 +409,8 @@ export class FleetClient {
 
   /**
    * robot.online / robot.offline (topic "presence"). Operator presence rides
-   * the same topic; take it with onEvent("operator.online" | "operator.offline").
+   * the same topic; take it with onEvent("operator.online" | "operator.offline"),
+   * and who is watching which robot with onEvent("operator.watching").
    */
   onPresence(handler: Handler<PresenceEvent>): () => void {
     const offOn = this.onEvent("robot.online", handler);
@@ -406,6 +419,23 @@ export class FleetClient {
       offOn();
       offOff();
     };
+  }
+
+  /**
+   * Every operator.* event (topic "presence"): online, offline, and watching.
+   * `data` is the operator's whole entry each time, the same object
+   * `snapshot.operators` lists, so one handler keeps a roster current by
+   * replacing the entry stored under `operator_id`.
+   */
+  onOperator(handler: Handler<OperatorEvent>): () => void {
+    // One entry per operator.* name; the Record type fails to compile when the
+    // protocol gains one that is not listed here.
+    const offs: Record<OperatorEventName, () => void> = {
+      "operator.online": this.onEvent("operator.online", handler),
+      "operator.offline": this.onEvent("operator.offline", handler),
+      "operator.watching": this.onEvent("operator.watching", handler),
+    };
+    return () => Object.values(offs).forEach((off) => off());
   }
 
   /** robot.telemetry (topic "telemetry"); `data` is the robot's telemetry payload. */

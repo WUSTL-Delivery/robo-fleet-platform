@@ -56,7 +56,7 @@ db: "fleet.db"
 heartbeat_interval_ms: 10000   # clients heartbeat at this rate; ~2.5 missed => offline
 lease_ttl_ms: 15000            # teleop lease expires this long after grant/renew
 sweep_ms: 1000                 # how often lapsed heartbeats / expired leases are swept
-client_msgs_per_sec: 50        # per connection, telemetry and channel.publish each
+client_msgs_per_sec: 50        # per connection; telemetry, channel.publish and watch each
 client_msgs_burst: 100         # back-to-back allowance before throttling starts
 map_center: "38.6488,-90.3108" # optional: console map opens here (lat,lon)
 map_radius_m: 1000             # how much around map_center to show
@@ -237,7 +237,7 @@ Topics:
 
 | Topic | You receive |
 |---|---|
-| `presence` | `event{robot.online}`, `event{robot.offline}`; `event{operator.online}`, `event{operator.offline}` (these carry `operator_id`, not `robot_id`; see `protocol/README.md`, Operator presence) |
+| `presence` | `event{robot.online}`, `event{robot.offline}`; `event{operator.online}`, `event{operator.offline}`, `event{operator.watching}` (these carry `operator_id`, not `robot_id`, and the operator's whole entry as `data`; see `protocol/README.md`, Operator presence) |
 | `events` | `event{robot.help_requested}`, `robot.lease_granted`, `robot.lease_released`, `robot.lease_revoked` |
 | `telemetry` | `event{robot.telemetry, robot_id, data: <the telemetry payload>}` for every robot in the fleet |
 | `layers` | every `layer.declare` / `layer.update` from services in the fleet; the retained ones are replayed right after the snapshot (2.7) |
@@ -310,12 +310,14 @@ holds (2.4). That one keeps the socket open and carries a fourth field, `lease`,
 lease in the way. A closing error has neither `ref` nor `lease`; the TypeScript and
 Python clients use that to keep a refused claim from ending the connection.
 
-`telemetry` and `channel.publish` are rate limited per connection, each type with its own
+`telemetry`, `channel.publish` and `watch` are rate limited per connection, each type with its own
 token bucket (`client_msgs_per_sec`, `client_msgs_burst`; defaults 50/s and 100). Over the
 limit, the server drops the message and replies `error{code: rate_limited, ref}` naming
 it, at most once per second however many it drops; the socket stays open. Nothing else
 (heartbeats, leases, subscribe, signaling) is throttled. Treat the notice as "send less
-often": telemetry is latest-wins, so there is nothing to resend.
+often": telemetry is latest-wins, so there is nothing to resend. `watch` is the exception:
+the server keeps the last one it accepted, so after the notice send the current selection
+once more (`protocol/README.md`, Watching a robot).
 
 ---
 

@@ -124,6 +124,7 @@ var payloadFactories = map[string]func() any{
 	protocol.TypeLeaseRenew:     func() any { return &protocol.LeaseRenew{} },
 	protocol.TypeLeaseRelease:   func() any { return &protocol.LeaseRelease{} },
 	protocol.TypeLeaseRevoked:   func() any { return &protocol.LeaseRevoked{} },
+	protocol.TypeWatch:          func() any { return &protocol.Watch{} },
 	protocol.TypeChannelPublish: func() any { return &protocol.ChannelPublish{} },
 	protocol.TypeChannelMessage: func() any { return &protocol.ChannelMessage{} },
 	protocol.TypeSignal:         func() any { return &protocol.Signal{} },

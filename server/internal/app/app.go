@@ -49,19 +49,29 @@ type App struct {
 	// update can never be followed by an older retained copy.
 	layerMu sync.Mutex
 
+	// opMu orders every change to an operator's entry (online, watching)
+	// with the event that announces it, and against the snapshot a subscriber
+	// is sent, so a subscriber never ends up holding an older entry than the
+	// server. It is taken before mu, never while holding it.
+	opMu sync.Mutex
+
 	mu    sync.Mutex
 	conns map[string]*gateway.Conn // clientID → live conn
+	// watching is operator id → the robot that operator's live connection
+	// said it is looking at. An operator with no connection has no entry.
+	watching map[string]string
 }
 
 func New(cfg Config, st store.Store) *App {
 	return &App{
-		cfg:   cfg,
-		st:    st,
-		reg:   registry.New(),
-		ops:   ops.New(time.Now, cfg.LeaseTTL),
-		bus:   bus.New(),
-		lay:   layers.New(),
-		conns: make(map[string]*gateway.Conn),
+		cfg:      cfg,
+		st:       st,
+		reg:      registry.New(),
+		ops:      ops.New(time.Now, cfg.LeaseTTL),
+		bus:      bus.New(),
+		lay:      layers.New(),
+		conns:    make(map[string]*gateway.Conn),
+		watching: make(map[string]string),
 	}
 }
 
@@ -158,9 +168,16 @@ func (a *App) Hello(h protocol.Hello) (store.Client, *protocol.ErrorMsg) {
 // --- gateway.Handler ---
 
 func (a *App) OnConnect(c *gateway.Conn) {
+	if c.Client.Kind == store.KindOperator {
+		a.opMu.Lock()
+		defer a.opMu.Unlock()
+	}
 	a.mu.Lock()
 	prev := a.conns[c.Client.ID]
 	a.conns[c.Client.ID] = c
+	// What an operator watches belongs to the connection that said so.
+	wasWatching := a.watching[c.Client.ID] != ""
+	delete(a.watching, c.Client.ID)
 	a.mu.Unlock()
 	if prev != nil {
 		a.dropConn(prev) // one live conn per identity; newest wins
@@ -174,18 +191,27 @@ func (a *App) OnConnect(c *gateway.Conn) {
 		a.emit(c.Client.FleetID, bus.TopicPresence, protocol.Event{Event: protocol.EventRobotOnline, RobotID: c.Client.ID})
 	case store.KindOperator:
 		// A connection that replaces a live one is the same operator still
-		// online: no event. (The replaced conn's OnDisconnect is a no-op too.)
+		// online: no online event. (The replaced conn's OnDisconnect is a no-op
+		// too.) The new connection has not said what it watches, so if the old
+		// one was watching a robot the fleet is told that it stopped.
 		if prev == nil {
-			a.emitOperator(c.Client, true)
+			a.emitOperator(protocol.EventOperatorOnline, c.Client, true, "")
+		} else if wasWatching {
+			a.emitOperator(protocol.EventOperatorWatching, c.Client, true, "")
 		}
 	}
 }
 
 func (a *App) OnDisconnect(c *gateway.Conn) {
+	if c.Client.Kind == store.KindOperator {
+		a.opMu.Lock()
+		defer a.opMu.Unlock()
+	}
 	a.mu.Lock()
 	current := a.conns[c.Client.ID] == c
 	if current {
 		delete(a.conns, c.Client.ID)
+		delete(a.watching, c.Client.ID)
 	}
 	a.mu.Unlock()
 	if !current {
@@ -203,7 +229,8 @@ func (a *App) OnDisconnect(c *gateway.Conn) {
 		for _, rv := range a.ops.DropOperator(c.Client.ID) {
 			a.notifyRevoked(rv)
 		}
-		a.emitOperator(c.Client, false)
+		// The offline entry carries no watching: this one event clears it.
+		a.emitOperator(protocol.EventOperatorOffline, c.Client, false, "")
 	}
 }
 
@@ -309,6 +336,12 @@ func (a *App) OnMessage(c *gateway.Conn, env protocol.Envelope) {
 			Event: protocol.EventRobotLeaseReleased, RobotID: lease.RobotID, Data: mustJSON(revoked),
 		})
 
+	case protocol.TypeWatch:
+		if !require(c, env, kind == store.KindOperator) {
+			return
+		}
+		a.handleWatch(c, env)
+
 	case protocol.TypeTwist:
 		if !require(c, env, kind == store.KindOperator) {
 			return
@@ -376,8 +409,10 @@ func (a *App) subscribe(c *gateway.Conn, topics []string) {
 		a.layerMu.Lock()
 		defer a.layerMu.Unlock()
 	}
+	a.opMu.Lock()
 	a.bus.Subscribe(c.Client.ID, topics)
 	c.Send(protocol.Msg(protocol.TypeSnapshot, a.snapshot(c.Client.FleetID)))
+	a.opMu.Unlock()
 	if wantsLayers {
 		for _, env := range a.lay.Replay(c.Client.FleetID) {
 			c.Send(env)
@@ -446,6 +481,84 @@ func (a *App) handleClaim(c *gateway.Conn, env protocol.Envelope, claim protocol
 	})
 }
 
+// handleWatch records which robot an operator is looking at and tells the
+// fleet's presence subscribers when that changed. It never replies on success.
+func (a *App) handleWatch(c *gateway.Conn, env protocol.Envelope) {
+	// robot_id must be present: a string names a robot, null stops watching.
+	var w struct {
+		RobotID json.RawMessage `json:"robot_id"`
+	}
+	if !parse(c, env, &w) {
+		return
+	}
+	robotID := ""
+	if string(w.RobotID) != "null" {
+		if json.Unmarshal(w.RobotID, &robotID) != nil || robotID == "" {
+			c.Send(errMsg(protocol.ErrInvalidMessage, "watch needs robot_id: a robot id or null", env.ID))
+			return
+		}
+	}
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
+	// The target must be a robot of the caller's fleet, online or not. Another
+	// fleet's robot, a client that is not a robot and a revoked robot all get
+	// the same answer as an id that does not exist, and nobody else hears of it.
+	if robotID != "" && !a.robotInFleet(c.Client.FleetID, robotID) {
+		c.Send(errMsg(protocol.ErrNotFound, "no such robot", env.ID))
+		return
+	}
+	a.mu.Lock()
+	// A connection that has been replaced no longer speaks for the operator.
+	changed := a.conns[c.Client.ID] == c && a.watching[c.Client.ID] != robotID
+	if changed && robotID != "" {
+		a.watching[c.Client.ID] = robotID
+	} else if changed {
+		delete(a.watching, c.Client.ID)
+	}
+	a.mu.Unlock()
+	// Saying again what the server already has is not news.
+	if changed {
+		a.emitOperator(protocol.EventOperatorWatching, c.Client, true, robotID)
+	}
+}
+
+// robotInFleet reports whether id is a robot of the fleet that is not revoked:
+// exactly the robots the fleet's snapshot lists.
+func (a *App) robotInFleet(fleetID, id string) bool {
+	robots, err := a.st.RobotsInFleet(fleetID)
+	if err != nil {
+		slog.Error("app: watch robot lookup failed", "err", err)
+		return false
+	}
+	for _, r := range robots {
+		if r.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// unwatchRobot stops every operator watching the robot and announces each.
+func (a *App) unwatchRobot(robotID string) {
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
+	var watchers []store.Client
+	a.mu.Lock()
+	for opID, watched := range a.watching {
+		if watched != robotID {
+			continue
+		}
+		delete(a.watching, opID)
+		if oc := a.conns[opID]; oc != nil {
+			watchers = append(watchers, oc.Client)
+		}
+	}
+	a.mu.Unlock()
+	for _, op := range watchers {
+		a.emitOperator(protocol.EventOperatorWatching, op, true, "")
+	}
+}
+
 func (a *App) handlePublish(c *gateway.Conn, env protocol.Envelope, pub protocol.ChannelPublish) {
 	if pub.Channel == "" || pub.Data == nil || (pub.To == "" && !pub.Broadcast) {
 		c.Send(errMsg(protocol.ErrInvalidMessage, "channel.publish needs channel, data, and to|broadcast", env.ID))
@@ -506,9 +619,15 @@ func (a *App) snapshot(fleetID string) protocol.Snapshot {
 	if err != nil {
 		slog.Error("app: snapshot operator query failed", "err", err)
 	}
+	a.mu.Lock()
+	watching := make(map[string]string, len(a.watching))
+	for opID, robotID := range a.watching {
+		watching[opID] = robotID
+	}
+	a.mu.Unlock()
 	for _, o := range operators {
 		_, online := a.reg.Get(o.ID)
-		snap.Operators = append(snap.Operators, operatorSummary(o, online))
+		snap.Operators = append(snap.Operators, operatorSummary(o, online, watching[o.ID]))
 	}
 	for _, r := range robots {
 		sum := protocol.RobotSummary{RobotID: r.ID, Name: r.Name, Presence: "offline"}
@@ -533,19 +652,21 @@ func (a *App) snapshot(fleetID string) protocol.Snapshot {
 
 // operatorSummary is an operator's entry in the snapshot and the data of its
 // presence events: one shape in both places, so a subscriber can upsert it.
-func operatorSummary(c store.Client, online bool) protocol.OperatorSummary {
-	return protocol.OperatorSummary{OperatorID: c.ID, Name: c.Name, Online: online}
+// An offline operator watches nothing.
+func operatorSummary(c store.Client, online bool, watching string) protocol.OperatorSummary {
+	sum := protocol.OperatorSummary{OperatorID: c.ID, Name: c.Name, Online: online}
+	if online {
+		sum.Watching = watching
+	}
+	return sum
 }
 
-// emitOperator announces an operator coming online or going offline to the
-// presence subscribers of its own fleet.
-func (a *App) emitOperator(c store.Client, online bool) {
-	name := protocol.EventOperatorOffline
-	if online {
-		name = protocol.EventOperatorOnline
-	}
+// emitOperator announces a change to an operator's entry (operator.online,
+// operator.offline, operator.watching) to the presence subscribers of its own
+// fleet. The caller holds opMu.
+func (a *App) emitOperator(event string, c store.Client, online bool, watching string) {
 	a.emit(c.FleetID, bus.TopicPresence, protocol.Event{
-		Event: name, OperatorID: c.ID, Data: mustJSON(operatorSummary(c, online)),
+		Event: event, OperatorID: c.ID, Data: mustJSON(operatorSummary(c, online, watching)),
 	})
 }
 
@@ -602,7 +723,10 @@ func (a *App) conn(clientID string) *gateway.Conn {
 // hello will get, so the SDKs stop instead of reconnecting. Teardown runs
 // through OnDisconnect like any other drop (robot.offline, operator leases
 // revoked). Reports whether a live connection was closed.
+//
+// A revoked robot is gone from the fleet, so nobody is watching it any more.
 func (a *App) DisconnectClient(clientID string) bool {
+	a.unwatchRobot(clientID)
 	c := a.conn(clientID)
 	if c == nil {
 		return false

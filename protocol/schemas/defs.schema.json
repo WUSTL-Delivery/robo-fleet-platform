@@ -112,7 +112,12 @@
       "properties": {
         "operator_id": { "type": "string", "minLength": 1 },
         "name": { "type": "string" },
-        "online": { "type": "boolean" }
+        "online": { "type": "boolean" },
+        "watching": {
+          "description": "The robot this operator is looking at. Absent when it is watching none; never set while online is false.",
+          "type": "string",
+          "minLength": 1
+        }
       },
       "required": ["operator_id", "online"],
       "additionalProperties": false
@@ -131,7 +136,8 @@
         "robot.lease_released",
         "robot.lease_revoked",
         "operator.online",
-        "operator.offline"
+        "operator.offline",
+        "operator.watching"
       ]
     }
   }

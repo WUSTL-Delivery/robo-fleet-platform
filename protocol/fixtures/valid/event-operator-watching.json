@@ -1,0 +1,10 @@
+{
+  "v": 0,
+  "type": "event",
+  "ts_ms": 1755100004000,
+  "payload": {
+    "event": "operator.watching",
+    "operator_id": "o_9c8d7e6f",
+    "data": { "operator_id": "o_9c8d7e6f", "name": "ada", "online": true, "watching": "r_1a2b3c4d" }
+  }
+}

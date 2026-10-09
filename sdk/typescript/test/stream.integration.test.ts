@@ -11,7 +11,9 @@ import {
   type Envelope,
   type FleetClientOptions,
   type FleetEvent,
+  type OperatorEvent,
   type OperatorPresenceEvent,
+  type OperatorSummary,
   type PresenceEvent,
   type SnapshotPayload,
   type StateChange,
@@ -245,6 +247,54 @@ describe("subscribe, events and channels against fleet-server", () => {
     );
     bo.close();
     expect((await offline).data).toEqual({ operator_id: boId, name: "bo", online: false });
+  });
+
+  it("sends watch and delivers who is watching which robot, live and in the snapshot", async () => {
+    const robot = makeClient({ kind: "robot", enrollmentKey: server.enrollKey });
+    const robotId = (await robot.connect()).client_id;
+    const ada = makeClient({ kind: "operator", name: "ada", enrollmentKey: await mintOperatorInvite() });
+    const adaId = (await ada.connect()).client_id;
+    await ada.subscribe(["presence"]);
+    const bo = makeClient({ kind: "operator", name: "bo", enrollmentKey: await mintOperatorInvite() });
+    const boId = (await bo.connect()).client_id;
+
+    // One handler for every operator event: each carries the whole entry.
+    const roster = new Map<string, OperatorSummary>();
+    ada.onOperator((e: OperatorEvent) => roster.set(e.operator_id, e.data));
+
+    const watching = next<FleetEvent<"operator.watching">>(
+      (h) => ada.onEvent("operator.watching", h),
+      (e) => e.operator_id === boId,
+      "operator.watching",
+    );
+    bo.send("watch", { robot_id: robotId }, { id: "watch-1" });
+    expect(await watching).toMatchObject({
+      event: "operator.watching",
+      operator_id: boId,
+      robot_id: "",
+      data: { operator_id: boId, name: "bo", online: true, watching: robotId },
+    });
+    expect(roster.get(boId)?.watching).toBe(robotId);
+
+    // A late subscriber reads it from the snapshot.
+    const late = await bo.subscribe(["presence"]);
+    expect(late.operators).toContainEqual({ operator_id: boId, name: "bo", online: true, watching: robotId });
+    expect(late.operators).toContainEqual({ operator_id: adaId, name: "ada", online: true });
+
+    // null stops watching: the entry comes back without `watching`.
+    const cleared = next<FleetEvent<"operator.watching">>(
+      (h) => ada.onEvent("operator.watching", h),
+      (e) => e.operator_id === boId,
+      "operator.watching cleared",
+    );
+    bo.send("watch", { robot_id: null });
+    expect((await cleared).data).toEqual({ operator_id: boId, name: "bo", online: true });
+    expect(roster.get(boId)?.watching).toBeUndefined();
+
+    // A robot of no fleet is refused, correlated by id.
+    const refused = next<Envelope<"error">>((h) => bo.on("error", h), (e) => e.payload.ref === "watch-x", "not_found");
+    bo.send("watch", { robot_id: "r_nobody" }, { id: "watch-x" });
+    expect((await refused).payload.code).toBe("not_found");
   });
 
   it("re-subscribes after a reconnect and re-delivers a fresh snapshot before further events", async () => {

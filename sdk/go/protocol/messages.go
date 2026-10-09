@@ -32,6 +32,7 @@ const (
 	TypeLeaseRenew     = "lease.renew"
 	TypeLeaseRelease   = "lease.release"
 	TypeLeaseRevoked   = "lease.revoked"
+	TypeWatch          = "watch"
 	TypeChannelPublish = "channel.publish"
 	TypeChannelMessage = "channel.message"
 	TypeSignal         = "signal"
@@ -58,6 +59,7 @@ const (
 	EventRobotLeaseRevoked  = "robot.lease_revoked"
 	EventOperatorOnline     = "operator.online"
 	EventOperatorOffline    = "operator.offline"
+	EventOperatorWatching   = "operator.watching"
 )
 
 // Lease revocation reasons.
@@ -221,11 +223,14 @@ type Snapshot struct {
 }
 
 // OperatorSummary is one operator of the fleet: an entry of Snapshot.Operators
-// and the data of the operator.online / operator.offline events.
+// and the data of every operator.* event.
 type OperatorSummary struct {
 	OperatorID string `json:"operator_id"`
 	Name       string `json:"name,omitempty"`
 	Online     bool   `json:"online"`
+	// Watching is the robot the operator is looking at; empty when none. Never
+	// set while Online is false.
+	Watching string `json:"watching,omitempty"`
 }
 
 type RobotSummary struct {
@@ -277,6 +282,12 @@ type LeaseRevoked struct {
 	Reason  string `json:"reason"`
 	// Help is set when the revocation returned the robot to HELP_REQUESTED.
 	Help *HelpDetails `json:"help,omitempty"`
+}
+
+// Watch says which robot the sending operator is looking at. RobotID is always
+// on the wire: nil marshals as null, which stops watching.
+type Watch struct {
+	RobotID *string `json:"robot_id"`
 }
 
 type ChannelPublish struct {

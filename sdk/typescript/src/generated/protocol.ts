@@ -168,13 +168,15 @@ export interface OperatorSummary {
   operator_id: string;
   name?: string;
   online: boolean;
+  /** The robot this operator is looking at. Absent when it is watching none; never set while online is false. */
+  watching?: string;
 }
 
 /** Source: `protocol/schemas/defs.schema.json#/$defs/channelName` */
 export type ChannelName = string;
 
 /** Source: `protocol/schemas/defs.schema.json#/$defs/eventName` */
-export type EventName = "robot.online" | "robot.offline" | "robot.telemetry" | "robot.help_requested" | "robot.lease_granted" | "robot.lease_released" | "robot.lease_revoked" | "operator.online" | "operator.offline";
+export type EventName = "robot.online" | "robot.offline" | "robot.telemetry" | "robot.help_requested" | "robot.lease_granted" | "robot.lease_released" | "robot.lease_revoked" | "operator.online" | "operator.offline" | "operator.watching";
 
 /** Source: `protocol/schemas/envelope.schema.json` */
 export interface RawEnvelope {
@@ -247,6 +249,16 @@ export interface LeaseRevokedPayload {
   robot_id: string;
   reason: "released" | "expired" | "stolen" | "operator_lost";
   help?: HelpDetails;
+}
+
+/**
+ * Operator to server: which robot this operator is looking at. It lasts as long as the connection that sent it.
+ *
+ * Source: `protocol/schemas/ops.schema.json#/$defs/watch`
+ */
+export interface WatchPayload {
+  /** A robot of the operator's fleet, or null to stop watching. */
+  robot_id: string | null;
 }
 
 /** Source: `protocol/schemas/robot.schema.json#/$defs/manifest` */

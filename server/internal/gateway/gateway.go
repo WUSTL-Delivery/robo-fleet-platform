@@ -77,7 +77,7 @@ type Gateway struct {
 	Auth                Auth
 	Handler             Handler
 	HeartbeatIntervalMs int
-	// RateLimit meters telemetry and channel.publish per connection; the zero
+	// RateLimit meters telemetry, channel.publish and watch per connection; the zero
 	// value disables it.
 	RateLimit RateLimit
 }

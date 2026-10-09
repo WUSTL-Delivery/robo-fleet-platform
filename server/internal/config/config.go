@@ -24,7 +24,7 @@ type Config struct {
 	SweepMs             int    `yaml:"sweep_ms"`
 
 	// Per-connection inbound limits on the chatty message types (telemetry,
-	// channel.publish), each metered separately (DESIGN.md D2). Over-limit
+	// channel.publish, watch), each metered separately (DESIGN.md D2). Over-limit
 	// messages are dropped with a rate_limited notice; the socket stays open.
 	ClientMsgsPerSec int `yaml:"client_msgs_per_sec"`
 	ClientMsgsBurst  int `yaml:"client_msgs_burst"`
