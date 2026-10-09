@@ -33,6 +33,8 @@ export interface FleetOptions {
   telemetryHz?: number;
   helpRatePerMin?: number;
   wander?: boolean;
+  /** false: robots never answer a WebRTC offer, so twist stays on the bus. Default true. */
+  p2p?: boolean;
   /** Directory for per-robot token files; null keeps tokens in memory (fresh identities each run). */
   stateDir?: string | null;
   namePrefix?: string;
@@ -77,6 +79,7 @@ export async function startFleet(o: FleetOptions): Promise<Fleet> {
       ...(o.telemetryHz !== undefined ? { telemetryHz: o.telemetryHz } : {}),
       ...(o.helpRatePerMin !== undefined ? { helpRatePerMin: o.helpRatePerMin } : {}),
       ...(o.wander !== undefined ? { wander: o.wander } : {}),
+      ...(o.p2p !== undefined ? { p2p: o.p2p } : {}),
       ...(o.log ? { log: o.log } : {}),
     });
   });

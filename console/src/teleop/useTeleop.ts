@@ -13,9 +13,14 @@
 //   - the moment the lease is gone (revoked: stolen, expired, operator lost;
 //     or the fleet state shows someone else holding it), stop sending and fall
 //     back to read-only.
+//
+// Which wire a twist rides (the direct WebRTC data channel, or the server bus
+// as the fallback) is twistTransport.ts's business: one transport is opened
+// per lease and closed when the lease ends. This hook only hands it setpoints.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FleetClient, Lease } from "@fleet-platform/sdk";
 import type { RobotView } from "../fleet/model";
+import { BUS_ONLY, openTwistTransport, type TwistLinkStatus, type TwistSetpoint, type TwistTransport } from "./twistTransport";
 
 export type TeleopPhase = "idle" | "claiming" | "driving";
 
@@ -34,6 +39,8 @@ export interface Teleop {
   held: ReadonlySet<DriveKey>;
   /** The setpoint being sent right now (zero when no key is held). */
   command: TwistCommand;
+  /** Which transport twist is riding right now, and the state of the direct link. */
+  link: TwistLinkStatus;
   /** Fraction of the manifest's limits a full key press asks for, 0.1 to 1. */
   speed: number;
   setSpeed: (s: number) => void;
@@ -47,6 +54,7 @@ export interface Teleop {
 export const TWIST_HZ = 10;
 const CLAIM_TIMEOUT_MS = 5000;
 const DEFAULT_SPEED = 0.5;
+const STOP: TwistSetpoint = { linear: { x_mps: 0 }, angular: { z_radps: 0 } };
 
 const KEYS: Record<string, DriveKey> = {
   KeyW: "forward",
@@ -106,6 +114,7 @@ export function useTeleop(client: FleetClient, robot: RobotView, operatorId: str
   const [held, setHeld] = useState<ReadonlySet<DriveKey>>(new Set());
   const [speed, setSpeedState] = useState(DEFAULT_SPEED);
   const [notice, setNotice] = useState<string | undefined>();
+  const [link, setLink] = useState<TwistLinkStatus>(BUS_ONLY);
 
   // Timers and socket handlers read these, not the render-time values.
   const phaseRef = useRef<TeleopPhase>("idle");
@@ -117,17 +126,12 @@ export function useTeleop(client: FleetClient, robot: RobotView, operatorId: str
   limitsRef.current = { maxV, maxW };
   const pendingRef = useRef<{ claim?: string; release?: string }>({});
   const seenInFleetRef = useRef(false);
+  const linkRef = useRef<TwistTransport | undefined>(undefined);
 
   const setPhase = useCallback((p: TeleopPhase) => {
     phaseRef.current = p;
     setPhaseState(p);
   }, []);
-  const setLease = useCallback((l: Lease | undefined) => {
-    leaseRef.current = l;
-    seenInFleetRef.current = false;
-    setLeaseState(l);
-  }, []);
-
   const trySend: FleetClient["send"] = useCallback(
     ((type, payload, opts) => {
       try {
@@ -139,13 +143,37 @@ export function useTeleop(client: FleetClient, robot: RobotView, operatorId: str
     [client],
   );
 
+  /**
+   * The lease this console holds changed. A new lease (never a renewal) gets
+   * its own twist transport; losing the lease, however it happened, closes it.
+   * Closing the peer connection is cleanup: the lease is already decided.
+   */
+  const setLease = useCallback(
+    (l: Lease | undefined) => {
+      leaseRef.current = l;
+      seenInFleetRef.current = false;
+      setLeaseState(l);
+      linkRef.current?.close();
+      linkRef.current = l
+        ? openTwistTransport({
+            client,
+            robotId,
+            leaseId: l.lease_id,
+            sendBus: (payload) => trySend("twist", payload, { id: nextId("twist") }),
+            onStatus: setLink,
+          })
+        : undefined;
+      setLink(linkRef.current?.status ?? BUS_ONLY);
+    },
+    [client, robotId, trySend],
+  );
+
   const sendTwist = useCallback(() => {
-    const l = leaseRef.current;
-    if (!l || phaseRef.current !== "driving") return;
+    if (!leaseRef.current || phaseRef.current !== "driving") return;
     const { maxV: v, maxW: w } = limitsRef.current;
     const cmd = twistFor(heldRef.current, speedRef.current, v, w);
-    trySend("twist", { lease_id: l.lease_id, linear: { x_mps: cmd.vx }, angular: { z_radps: cmd.wz } }, { id: nextId("twist") });
-  }, [trySend]);
+    linkRef.current?.send({ linear: { x_mps: cmd.vx }, angular: { z_radps: cmd.wz } });
+  }, []);
 
   const setKeys = useCallback(
     (next: Set<DriveKey>) => {
@@ -301,7 +329,9 @@ export function useTeleop(client: FleetClient, robot: RobotView, operatorId: str
       const l = leaseRef.current;
       if (!l) return;
       heldRef.current = new Set();
-      sendTwistZero(trySend, l.lease_id);
+      linkRef.current?.send(STOP);
+      linkRef.current?.close();
+      linkRef.current = undefined;
       trySend("lease.release", { lease_id: l.lease_id, resolution: "abandoned" }, { id: nextId("release") });
       leaseRef.current = undefined;
     },
@@ -322,7 +352,7 @@ export function useTeleop(client: FleetClient, robot: RobotView, operatorId: str
     if (!l || phaseRef.current !== "driving") return;
     heldRef.current = new Set();
     setHeld(new Set());
-    sendTwistZero(trySend, l.lease_id);
+    linkRef.current?.send(STOP);
     const id = nextId("release");
     pendingRef.current.release = id;
     // The server answers a release with the robot.lease_released event, not a
@@ -347,14 +377,11 @@ export function useTeleop(client: FleetClient, robot: RobotView, operatorId: str
     lease,
     held,
     command: phase === "driving" ? twistFor(held, speed, maxV, maxW) : { vx: 0, wz: 0 },
+    link,
     speed,
     setSpeed,
     notice,
     takeOver,
     release,
   };
-}
-
-function sendTwistZero(send: FleetClient["send"], leaseId: string): void {
-  send("twist", { lease_id: leaseId, linear: { x_mps: 0 }, angular: { z_radps: 0 } }, { id: nextId("twist") });
 }
