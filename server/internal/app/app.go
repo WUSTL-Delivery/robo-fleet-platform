@@ -11,11 +11,11 @@ import (
 	"sync"
 	"time"
 
+	"fleetplatform/sdk/go/protocol"
 	"fleetplatform/server/internal/bus"
 	"fleetplatform/server/internal/gateway"
 	"fleetplatform/server/internal/layers"
 	"fleetplatform/server/internal/ops"
-	"fleetplatform/server/internal/protocol"
 	"fleetplatform/server/internal/registry"
 	"fleetplatform/server/internal/signaling"
 	"fleetplatform/server/internal/store"

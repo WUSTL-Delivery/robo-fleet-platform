@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"fleetplatform/sdk/go/protocol"
 	"fleetplatform/server/internal/app"
-	"fleetplatform/server/internal/protocol"
 	"fleetplatform/server/internal/store"
 )
 

@@ -6,7 +6,7 @@ package signaling
 import (
 	"errors"
 
-	"fleetplatform/server/internal/protocol"
+	"fleetplatform/sdk/go/protocol"
 )
 
 var ErrBadSignal = errors.New("signaling: missing target or unknown kind")

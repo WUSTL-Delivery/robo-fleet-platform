@@ -11,7 +11,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"fleetplatform/server/internal/protocol"
+	"fleetplatform/sdk/go/protocol"
 )
 
 func enrollKeyLifecycleEnroll(t *testing.T, base, key, name string) protocol.Envelope {

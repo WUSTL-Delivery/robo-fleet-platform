@@ -10,7 +10,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"fleetplatform/server/internal/protocol"
+	"fleetplatform/sdk/go/protocol"
 )
 
 // clientRevokeHello dials /ws, says hello, and returns the socket and the reply.

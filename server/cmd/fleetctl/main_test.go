@@ -17,7 +17,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"fleetplatform/server/internal/protocol"
+	"fleetplatform/sdk/go/protocol"
 )
 
 const (

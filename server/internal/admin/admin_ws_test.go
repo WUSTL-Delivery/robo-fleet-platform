@@ -10,7 +10,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"fleetplatform/server/internal/protocol"
+	"fleetplatform/sdk/go/protocol"
 )
 
 // adminInviteEnrollOverWS sends one enroll.request over a real websocket and

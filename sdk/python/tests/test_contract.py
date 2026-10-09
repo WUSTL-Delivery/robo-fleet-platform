@@ -1,7 +1,7 @@
 """Layer 1 contract tests (docs/TESTING.md): the Python side of the cross-language handshake.
 
 Validates every golden fixture in protocol/fixtures against the same JSON Schemas and
-catalog.json the Go server uses (server/internal/protocol/contract_test.go) and the TS
+catalog.json the Go server uses (sdk/go/protocol/contract_test.go) and the TS
 SDK uses (sdk/typescript/test/contract.test.ts): envelope schema, known type, then the
 payload schema the catalog maps that type to.
 

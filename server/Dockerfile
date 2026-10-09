@@ -40,12 +40,16 @@ ARG VERSION=dev
 ARG TARGETOS
 ARG TARGETARCH
 
-WORKDIR /src
+# Same layout as the repo: server/go.mod reaches the wire types through
+# "replace fleetplatform/sdk/go => ../sdk/go".
+WORKDIR /src/server
 
 # Dependency layer first so source edits don't re-download modules.
+COPY sdk/go/go.mod sdk/go/go.sum /src/sdk/go/
 COPY server/go.mod server/go.sum ./
 RUN go mod download
 
+COPY sdk/go/ /src/sdk/go/
 COPY server/ .
 # go:embed picks this up (internal/web/console.go).
 COPY --from=console /src/console/dist/ ./internal/web/dist/

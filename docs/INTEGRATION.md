@@ -660,8 +660,8 @@ Read this before designing against the server. Each item is a known gap, not a h
 
 - **Contract tests.** `protocol/fixtures/valid/*.json` must all validate and
   `protocol/fixtures/invalid/*.json` must all fail, in every language that touches the
-  wire. Run them against your own serializer before trusting it; the server already runs
-  them (`server/internal/protocol/contract_test.go`). Add a fixture whenever you find a
+  wire. Run them against your own serializer before trusting it; the server's Go types
+  already run them (`sdk/go/protocol/contract_test.go`). Add a fixture whenever you find a
   shape the schemas do not pin down.
 - **The reference storyline.** `server/internal/app/integration_test.go`
   (`TestIntegrationStoryline`) is the canonical end-to-end flow: enroll, connect, manifest,

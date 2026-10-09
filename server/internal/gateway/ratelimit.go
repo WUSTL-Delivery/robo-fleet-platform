@@ -3,7 +3,7 @@ package gateway
 import (
 	"time"
 
-	"fleetplatform/server/internal/protocol"
+	"fleetplatform/sdk/go/protocol"
 )
 
 // RateLimit caps how fast one connection may send the chatty message types

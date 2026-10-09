@@ -1,7 +1,7 @@
 // Layer 1 contract tests (docs/TESTING.md): the TS side of the cross-language
 // handshake. Validates every golden fixture in protocol/fixtures against the same
 // JSON Schemas and catalog.json the Go server uses
-// (server/internal/protocol/contract_test.go): envelope schema, known type,
+// (sdk/go/protocol/contract_test.go): envelope schema, known type,
 // then the payload schema the catalog maps that type to.
 import { readdirSync, readFileSync } from "node:fs";
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";

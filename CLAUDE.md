@@ -84,6 +84,7 @@ server/       # command server: auth, fleets, presence, intervention queue,
 console/      # web app: map, fleet list, queue, teleop UI, replay scrubber
 sdk/
   typescript/ # for services (club path service is first consumer)
+  go/         # for Go services; go/protocol holds the Go wire types the server imports too
   python/     # for hobby robots / quick agents
   ros2/       # fleet_agent package: manifest, twist bridge, camera, watchdog
 sim/          # fake fleet speaking the REAL protocol; dev environment + demo

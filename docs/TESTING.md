@@ -11,7 +11,7 @@ the one below can't. Sim-first discipline applies: **nothing lands without a tes
 
 Every language that speaks the protocol validates **the same fixtures**:
 
-- Go server: `cd server && go test ./internal/protocol/` — validates all fixtures against
+- Go (server and Go SDK share these types): `cd sdk/go && go test ./protocol/` — validates all fixtures against
   the schemas, and round-trips them through the Go structs (unmarshal → marshal → still
   schema-valid). This is what stops the Go types drifting from the schemas.
 - TS SDK: `cd sdk/typescript && npm test` — `test/contract.test.ts` validates the same

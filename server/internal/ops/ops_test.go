@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"fleetplatform/server/internal/protocol"
+	"fleetplatform/sdk/go/protocol"
 )
 
 const ttl = 15 * time.Second

@@ -28,7 +28,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: server/go.mod
-          cache-dependency-path: server/go.sum
+          cache-dependency-path: |
+            server/go.sum
+            sdk/go/go.sum
 
       - name: gofmt
         working-directory: server
@@ -51,6 +53,43 @@ jobs:
       # Same gate the club deploy uses: refuse to ship a known vulnerability.
       - name: govulncheck
         working-directory: server
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  # sdk/go is its own Go module (the wire types in sdk/go/protocol, imported by the
+  # server through a replace), so `./...` in server/ does not reach it. The schema
+  # contract test lives here.
+  sdk-go:
+    name: Go SDK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/go
+    steps:
+      - uses: actions/checkout@v4
+
+      # Runs on the server's toolchain; sdk/go/go.mod declares the oldest Go the
+      # SDK supports, which is not what CI should build with.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: sdk/go/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   sdk-typescript:
@@ -174,7 +213,7 @@ jobs:
 
   image:
     name: Build and publish image
-    needs: [test, console]
+    needs: [test, sdk-go, console]
     # Default branch and version tags only; never for pull requests (a fork's
     # PR has no packages:write token anyway).
     if: >-

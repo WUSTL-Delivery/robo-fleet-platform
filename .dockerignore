@@ -1,9 +1,10 @@
 # The image build context is the repo root (server/Dockerfile). Keep it to what
-# the build reads: server/, console/, sdk/typescript/ sources.
+# the build reads: server/, console/, sdk/typescript/, sdk/go/ sources.
 *
 !server/
 !console/
 !sdk/typescript/
+!sdk/go/
 
 **/node_modules/
 **/dist/

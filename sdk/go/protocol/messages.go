@@ -1,6 +1,8 @@
-// Package protocol mirrors protocol/ (the JSON Schemas, which are the source of
-// truth). contract_test.go keeps these structs honest against the schemas and
-// fixtures — change the schema first, then this file.
+// Package protocol is the Go form of the wire protocol: it mirrors protocol/ at the
+// repo root (the JSON Schemas, which are the source of truth). fleet-server and the
+// Go SDK both import it, and it is the only place Go wire structs are defined.
+// contract_test.go keeps these structs honest against the schemas and fixtures —
+// change the schema first, then this file.
 package protocol
 
 import (
