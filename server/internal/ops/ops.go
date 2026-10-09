@@ -26,7 +26,11 @@ type Lease struct {
 	ID         string
 	RobotID    string
 	OperatorID string
-	ExpiresAt  time.Time
+	// FleetID is the fleet of the robot and the operator. It is not on the
+	// wire; it is here so a lease that dies when neither of them is connected
+	// can still be announced to the right fleet.
+	FleetID   string
+	ExpiresAt time.Time
 }
 
 func (l Lease) Proto() protocol.Lease {
@@ -144,7 +148,7 @@ func (o *Ops) RequestHelp(robotID, reason string, context map[string]any) *Help 
 //
 // An operator claiming a robot it already holds is not a steal and needs no
 // flag: its old lease is replaced by a new one (reported as revoked, stolen).
-func (o *Ops) Claim(robotID, operatorID string, steal bool) (Lease, *Revoked, error) {
+func (o *Ops) Claim(fleetID, robotID, operatorID string, steal bool) (Lease, *Revoked, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	r := o.get(robotID)
@@ -159,6 +163,7 @@ func (o *Ops) Claim(robotID, operatorID string, steal bool) (Lease, *Revoked, er
 		ID:         "ls_" + randHex(8),
 		RobotID:    robotID,
 		OperatorID: operatorID,
+		FleetID:    fleetID,
 		ExpiresAt:  o.now().Add(o.ttl),
 	}
 	r.lease = &lease

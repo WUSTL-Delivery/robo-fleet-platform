@@ -33,7 +33,11 @@ type Auth interface {
 
 // Handler receives lifecycle + messages for authenticated connections.
 type Handler interface {
-	OnConnect(c *Conn)
+	// OnConnect registers the connection and sends welcome on it (c.Send),
+	// after adding what only the handler knows: a robot's lease. The handler
+	// sends it because the welcome has to be ordered with the handler's own
+	// messages to this client; the gateway cannot do that from outside.
+	OnConnect(c *Conn, welcome protocol.Welcome)
 	OnMessage(c *Conn, env protocol.Envelope)
 	OnDisconnect(c *Conn)
 }
@@ -152,15 +156,15 @@ func (g *Gateway) serveSession(ctx context.Context, ws *websocket.Conn, env prot
 		done:   make(chan struct{}),
 	}
 	go c.writeLoop(ctx)
-	// Register before welcoming: once a client sees welcome, it is present.
-	g.Handler.OnConnect(c)
-	c.Send(protocol.Msg(protocol.TypeWelcome, protocol.Welcome{
+	// The handler registers before it welcomes: once a client sees welcome,
+	// it is present.
+	g.Handler.OnConnect(c, protocol.Welcome{
 		ClientID:            client.ID,
 		FleetID:             client.FleetID,
 		Kind:                string(client.Kind),
 		ServerTimeMs:        time.Now().UnixMilli(),
 		HeartbeatIntervalMs: g.HeartbeatIntervalMs,
-	}))
+	})
 	defer func() {
 		close(c.done)
 		g.Handler.OnDisconnect(c)
