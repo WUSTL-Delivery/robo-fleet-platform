@@ -352,6 +352,11 @@ replies `error{code: not_found}` to the sender when the target is not connected.
   (operator) or answer (robot), and holds back candidates gathered earlier until then.
   A receiver MUST hold candidates that arrive before it has applied the remote
   description, and add them afterwards.
+- Trickling is optional for the sender. A side MAY finish gathering first, put every
+  candidate in its SDP and send no `ice` at all (the Python SDK's robot does, because
+  aiortc gathers that way). So a receiver MUST NOT wait for an `ice` before it starts
+  connecting, and MUST work with an SDP that carries no candidates when they follow as
+  `ice`.
 - **The robot answers an offer only if** it currently holds a lease, the signal's
   `from` equals that lease's `operator_id` (from `lease.granted`), and `data.lease_id`
   equals that lease's id. Any other offer is dropped without a reply. `ice` is accepted
@@ -385,8 +390,8 @@ or not one of the three shapes below.
 
 - `lease_id`, `linear` (`x_mps`, optional `y_mps`) and `angular` (`z_radps`) mean
   exactly what they mean in the `twist` schema, and numbers must be finite.
-- `seq` is a positive integer that the operator increases with every twist it sends on
-  the channel. It exists because the channel is unordered.
+- `seq` is a positive integer, at most 2^53 - 1, that the operator increases with every
+  twist it sends on the channel. It exists because the channel is unordered.
 - The robot processes a twist in this order: (1) drop it if `seq` is not greater than
   the highest `seq` it has obeyed on this channel; (2) drop it unless `lease_id` is the
   lease it currently holds; (3) obey it, restart the deadman, and remember `seq`. A
@@ -394,6 +399,9 @@ or not one of the three shapes below.
   each new channel.
 - A robot whose control connection to the server is not open MUST NOT obey twist from
   the channel: it could not hear a revocation. It resumes when the connection is back.
+- Only an obeyed twist moves the remembered `seq`. A twist the robot does not obey for
+  any other reason (its control connection is down, its manifest declares no drive) is
+  dropped like one refused at step 2 and leaves the mark where it was.
 
 **Ping** (operator → robot) and **pong** (robot → operator) are the operator's liveness
 check, because a browser can take many seconds to report a dead peer connection:
