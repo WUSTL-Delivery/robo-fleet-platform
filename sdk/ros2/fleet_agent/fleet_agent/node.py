@@ -14,32 +14,64 @@ an SDK callback (``robot.on_twist``, ``robot.on_lease``, ``channel.on_message``)
 fires on the link thread and publishes to a ROS topic; a ROS callback hands work
 to the link with ``asyncio.run_coroutine_threadsafe(..., self._loop)``.
 
+Teleop (only when ``drive.type`` is set): the SDK decides which twist is valid
+(current lease only) and issues its own stops; ``_on_twist`` passes both to a
+``TwistGate`` (gate.py), which clamps to the drive limits and publishes
+``geometry_msgs/Twist`` on ``cmd_vel.topic``. The deadman exists twice on
+purpose: the SDK's timer on the link thread, and the gate's watchdog on a ROS
+steady-clock timer on the ROS thread. Either one stops the robot alone, so a
+blocked or dead link thread cannot leave it moving, and neither needs the
+server. The lease state is latched on ``fleet/lease`` (fleet_agent_msgs/Lease).
+
 Parameters (config/fleet_agent.example.yaml documents each):
 ``url``, ``name``, ``token_file``, ``enroll_key``, ``drive.type``,
-``drive.max_v_mps``, ``drive.max_w_radps``, ``telemetry.fix_topic``,
-``telemetry.battery_topic``, ``telemetry.rate_hz``, ``telemetry.pose_timeout_s``.
+``drive.max_v_mps``, ``drive.max_w_radps``, ``cmd_vel.topic``,
+``cmd_vel.deadman_ms``, ``telemetry.fix_topic``, ``telemetry.battery_topic``,
+``telemetry.rate_hz``, ``telemetry.pose_timeout_s``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import socket
 import threading
 import time
 from typing import Any, Optional
 
 import rclpy
+from geometry_msgs.msg import Twist
+from rclpy.clock import Clock, ClockType
 from rclpy.exceptions import InvalidParameterTypeException
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import BatteryState, NavSatFix
 
 from fleet import ConnectionState, FileTokenStore, FleetClientError, Robot, StateChange
+from fleet.robot import LeaseChange, TwistCommand
+from fleet_agent_msgs.msg import Lease
 
 from . import __version__
 from .conversions import battery_from_state, build_manifest, pose_from_fix
+from .gate import TwistGate
+
+#: Where the lease state is latched, relative to the node's namespace.
+LEASE_TOPIC = "fleet/lease"
+
+#: Latched: reliable, and the last message is kept for subscribers that join late.
+LATCHED_QOS = QoSProfile(
+    depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL
+)
+
+#: Why the SDK stopped the robot, for the log (``TwistCommand.source``).
+_SDK_STOPS = {
+    "deadman": "deadman: no valid twist",
+    "revoked": "lease revoked",
+    "disconnected": "link to fleet-server lost",
+}
 
 #: Read for the enrollment key when the ``enroll_key`` parameter is empty, so the
 #: secret can stay out of parameter files (the same variable the Python SDK examples use).
@@ -85,10 +117,10 @@ class _Latest:
 
 
 class FleetAgent(Node):
-    """Connects this robot to fleet-server and reports its telemetry."""
+    """Connects this robot to fleet-server: telemetry out, operator twist in, lease state latched."""
 
-    def __init__(self) -> None:
-        super().__init__("fleet_agent")
+    def __init__(self, **node_args: Any) -> None:
+        super().__init__("fleet_agent", **node_args)
 
         url = self.declare_parameter("url", "ws://localhost:8080/ws").value
         name = self.declare_parameter("name", "").value or socket.gethostname()
@@ -98,6 +130,10 @@ class FleetAgent(Node):
         drive_type = self.declare_parameter("drive.type", "").value
         max_v_mps = self.declare_parameter("drive.max_v_mps", 0.0).value
         max_w_radps = self.declare_parameter("drive.max_w_radps", 0.0).value
+        cmd_vel_topic = self.declare_parameter("cmd_vel.topic", "cmd_vel").value
+        deadman_ms = int(self.declare_parameter("cmd_vel.deadman_ms", 300).value)
+        if not 100 <= deadman_ms <= 1000:
+            raise ValueError(f"cmd_vel.deadman_ms must be between 100 and 1000, got {deadman_ms!r}")
 
         fix_topic = self.declare_parameter("telemetry.fix_topic", "").value
         battery_topic = self.declare_parameter("telemetry.battery_topic", "").value
@@ -130,14 +166,50 @@ class FleetAgent(Node):
             enrollment_key=enroll_key or None,  # only used while the token file is empty
             token_store=FileTokenStore(token_file),
             agent={"name": "fleet_agent", "version": __version__},
+            # cmd_vel.deadman_ms is the deadline for zero to be ON the topic, so both
+            # timers (this one and the gate's watchdog) fire a little before it.
+            deadman_ms=deadman_ms - int(TwistGate.EARLY_S * 1000),
         )
         self._robot.client.on_state(self._on_state)
+
+        self._connected = False
+        self._ended: Optional[LeaseChange] = None
+        self._lease_pub = self.create_publisher(Lease, LEASE_TOPIC, LATCHED_QOS)
+        self._robot.on_lease(self._on_lease)
+        self._publish_lease()
+
+        #: None for a robot that declares no drive: it has no cmd_vel publisher at all.
+        self.gate: Optional[TwistGate] = None
+        if "drive" in manifest:
+            if not cmd_vel_topic:
+                raise ValueError("cmd_vel.topic must not be empty when drive.type is set")
+            # Depth 1: a setpoint is only worth delivering while it is the newest.
+            self._cmd_vel_pub = self.create_publisher(Twist, cmd_vel_topic, 1)
+            self.gate = TwistGate(
+                self._publish_cmd_vel,
+                max_v_mps=float(max_v_mps),
+                max_w_radps=float(max_w_radps),
+                deadman_s=deadman_ms / 1000,
+                on_stop=lambda reason: self.get_logger().warning(f"cmd_vel zeroed: {reason}"),
+            )
+            self._robot.on_twist(self._on_twist)
+            # Steady clock: the watchdog must keep time when sim time is paused, and
+            # it runs on the ROS thread so it does not need the link thread alive.
+            self._watchdog = self.create_timer(
+                TwistGate.TICK_S, self.gate.tick, clock=Clock(clock_type=ClockType.STEADY_TIME)
+            )
+            self.get_logger().info(
+                f"operator twist goes to '{self._cmd_vel_pub.topic_name}', limited to "
+                f"{max_v_mps} m/s and {max_w_radps} rad/s, deadman {deadman_ms} ms"
+            )
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._link_thread, name="fleet-link", daemon=True)
         self._finished = threading.Event()
         #: Set when the link ended for a reason retrying cannot fix (bad key, revoked token, ...).
         self.fatal: Optional[FleetClientError] = None
+        #: Set when the link thread died of anything else (a bug); the process exits non-zero.
+        self.crashed: Optional[BaseException] = None
 
         self.get_logger().info(f"connecting to {url} as '{name}' (token file {token_file}), manifest {manifest}")
 
@@ -153,7 +225,14 @@ class FleetAgent(Node):
         return self._finished.is_set()
 
     def stop(self) -> None:
-        """Closes the connection and joins the link thread. Safe to call twice."""
+        """Zeroes cmd_vel, closes the connection and joins the link thread. Safe to call twice."""
+        if self.gate is not None:
+            try:
+                # Before the link is closed, and final: a twist that is still on its way
+                # in must not move the robot after this.
+                self.gate.close("fleet_agent is shutting down")
+            except Exception as e:  # the ROS context is already gone; nothing can be published
+                self.get_logger().warning(f"could not publish the final stop: {e!r}")
         if self._thread.is_alive():
             try:
                 asyncio.run_coroutine_threadsafe(self._robot.close(), self._loop).result(timeout=5.0)
@@ -169,12 +248,58 @@ class FleetAgent(Node):
     def _on_battery(self, msg: BatteryState) -> None:
         self._latest.set_battery(battery_from_state(msg))
 
+    # ------------------------------------------------------------------ either thread
+
+    def _publish_cmd_vel(self, x: float, y: float, wz: float) -> None:
+        msg = Twist()
+        msg.linear.x, msg.linear.y, msg.angular.z = x, y, wz
+        self._cmd_vel_pub.publish(msg)
+
+    def _publish_lease(self) -> None:
+        msg = Lease()
+        msg.stamp = self.get_clock().now().to_msg()
+        msg.mode = self._robot.mode
+        msg.connected = self._connected
+        held = self._robot.lease
+        if held is not None:
+            msg.held = True
+            msg.lease_id = held.lease_id
+            msg.operator_id = held.operator_id or ""
+        elif self._ended is not None:
+            msg.lease_id = self._ended.lease_id
+            msg.reason = self._ended.reason or ""
+        self._lease_pub.publish(msg)
+
     # ------------------------------------------------------------------ link thread
+
+    def _on_twist(self, cmd: TwistCommand) -> None:
+        # Called synchronously by the SDK the moment a command is decided. Only the
+        # current lease's twist gets this far; the gate checks the lease id again.
+        assert self.gate is not None
+        if cmd.source == "operator":
+            self.gate.operator_twist(cmd.lease_id, cmd.linear_x, cmd.linear_y, cmd.angular_z)
+        else:
+            self.gate.stop(_SDK_STOPS.get(cmd.source, cmd.source))
+
+    def _on_lease(self, change: LeaseChange) -> None:
+        # The SDK has already stopped the robot if this ends or replaces a lease.
+        log = self.get_logger()
+        if change.granted:
+            log.info(f"lease {change.lease_id} granted to operator {change.operator_id}")
+        else:
+            self._ended = change
+            log.info(f"lease {change.lease_id} ended: {change.reason}")
+        if self.gate is not None:
+            self.gate.set_lease(change.lease_id if change.granted else None)
+        self._publish_lease()
 
     def _link_thread(self) -> None:
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_until_complete(self._link())
+        except Exception as e:
+            self.crashed = e
+            self.get_logger().fatal(f"the link thread died: {e!r}")
         finally:
             self._loop.close()
             self._finished.set()
@@ -201,6 +326,10 @@ class FleetAgent(Node):
 
     def _on_state(self, change: StateChange) -> None:
         log = self.get_logger()
+        connected = change.state is ConnectionState.OPEN
+        if connected != self._connected:
+            self._connected = connected
+            self._publish_lease()
         if change.state is ConnectionState.ENROLLING:
             log.info("no stored token: enrolling with the fleet enrollment key")
         elif change.state is ConnectionState.OPEN:
@@ -210,7 +339,12 @@ class FleetAgent(Node):
 
 
 def main(args: Optional[list[str]] = None) -> int:
-    rclpy.init(args=args)
+    # No rclpy signal handlers: they shut the context down before the node could
+    # publish a final zero velocity. The handlers here only end the loop below.
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    interrupted = threading.Event()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda signum, frame: interrupted.set())
     try:
         node = FleetAgent()
     except (ValueError, InvalidParameterTypeException) as e:
@@ -223,7 +357,7 @@ def main(args: Optional[list[str]] = None) -> int:
     node.start()
     try:
         # A loop, not spin(): a fatal link error has to end the process too.
-        while rclpy.ok() and not node.finished:
+        while rclpy.ok() and not node.finished and not interrupted.is_set():
             executor.spin_once(timeout_sec=0.2)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
@@ -232,7 +366,7 @@ def main(args: Optional[list[str]] = None) -> int:
         executor.shutdown()
         node.destroy_node()
         rclpy.try_shutdown()
-    return 1 if node.fatal is not None else 0
+    return 1 if node.fatal is not None or node.crashed is not None else 0
 
 
 if __name__ == "__main__":

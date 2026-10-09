@@ -5,7 +5,7 @@ import math
 import pytest
 from sensor_msgs.msg import BatteryState, NavSatFix, NavSatStatus
 
-from fleet_agent.conversions import battery_from_state, build_manifest, pose_from_fix
+from fleet_agent.conversions import battery_from_state, build_manifest, clamp_twist, pose_from_fix
 
 
 def _fix(lat, lon, alt=float("nan"), status=NavSatStatus.STATUS_FIX):
@@ -68,3 +68,27 @@ def test_battery_fraction_becomes_percent():
     assert battery_from_state(BatteryState(percentage=float("nan"), voltage=12.0)) == {"voltage": 12.0}
     assert battery_from_state(BatteryState(percentage=1.5, voltage=float("nan"))) == {"pct": 100.0}
     assert battery_from_state(BatteryState(percentage=float("nan"), voltage=float("nan"))) is None
+
+
+def test_twist_inside_the_limits_is_unchanged():
+    assert clamp_twist(0.4, 0.0, -0.2, max_v_mps=1.0, max_w_radps=1.5) == (0.4, 0.0, -0.2)
+    assert clamp_twist(-1.0, 0.0, 1.5, max_v_mps=1.0, max_w_radps=1.5) == (-1.0, 0.0, 1.5)
+
+
+def test_twist_is_clamped_to_the_drive_limits():
+    assert clamp_twist(5.0, 0.0, 9.0, max_v_mps=1.0, max_w_radps=1.5) == (1.0, 0.0, 1.5)
+    assert clamp_twist(-5.0, 0.0, -9.0, max_v_mps=1.0, max_w_radps=1.5) == (-1.0, 0.0, -1.5)
+    # A holonomic setpoint keeps its direction: the vector is scaled, not each axis clipped.
+    x, y, w = clamp_twist(3.0, 4.0, 0.0, max_v_mps=1.0, max_w_radps=1.5)
+    assert (x, y, w) == pytest.approx((0.6, 0.8, 0.0))
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_twist_becomes_a_stop(bad):
+    for twist in ((bad, 0.0, 0.0), (0.5, bad, 0.0), (0.5, 0.0, bad)):
+        assert clamp_twist(*twist, max_v_mps=1.0, max_w_radps=1.5) == (0.0, 0.0, 0.0)
+
+
+def test_a_stop_is_plain_zero():
+    stop = clamp_twist(-0.0, -0.0, -0.0, max_v_mps=1.0, max_w_radps=1.5)
+    assert stop == (0.0, 0.0, 0.0) and not any(math.copysign(1.0, c) < 0 for c in stop)

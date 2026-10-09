@@ -26,6 +26,20 @@ fleet_agent:
     drive.max_v_mps: 1.5
     drive.max_w_radps: 1.5
 
+    # Teleop output (only with drive.type set). The twist of the operator who holds
+    # the lease is clamped to the two limits above and published here as
+    # geometry_msgs/Twist. Point it at the highest-priority input of the robot's
+    # twist mux. Default: cmd_vel (relative, so it follows the node's namespace).
+    cmd_vel.topic: /cmd_vel_teleop
+    # Deadman: zero velocity is on cmd_vel.topic within this many milliseconds of the
+    # last valid twist, with or without a network. An integer (300, not 300.0),
+    # 100 to 1000. The console sends twist every 100 ms; leave this at 300.
+    cmd_vel.deadman_ms: 300
+    # The base controller or the mux still needs its own command timeout: if this
+    # process is killed, nothing here can publish a stop.
+    #
+    # Lease state is latched on fleet/lease (fleet_agent_msgs/Lease); no parameter.
+
     # Telemetry sources. Leave a topic empty if the robot does not have it.
     # fix_topic (sensor_msgs/NavSatFix) becomes a geographic pose; a robot without
     # GPS leaves it empty and is online without a pose.
