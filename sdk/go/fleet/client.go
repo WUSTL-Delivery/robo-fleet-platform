@@ -21,6 +21,9 @@
 //	                                          the welcome and fires on EVERY (re)connect
 //	client.State / Welcome / ClientID / FleetID / Done / Err
 //
+// subscribe.go adds snapshot-then-stream on top: Subscribe and the typed
+// OnSnapshot / OnPresence / OnLease / OnHelp / OnTelemetry / OnEvent callbacks.
+//
 // # Reconnect policy
 //
 // Only transient failures retry: a network drop, a server restart, a handshake
@@ -197,6 +200,9 @@ type Client struct {
 	onState     []entry[StateChange]
 	onType      map[string][]entry[protocol.Envelope]
 	onAny       []entry[protocol.Envelope]
+
+	// stream is the snapshot-then-stream layer (subscribe.go).
+	stream stream
 
 	// queue feeds the delivery goroutine. Only the connection goroutine sends on
 	// it (through deliver) and only that goroutine closes it.
@@ -676,6 +682,10 @@ func (c *Client) sessionOpened(conn *websocket.Conn, welcome *protocol.Welcome) 
 	c.welcome = welcome
 	c.mu.Unlock()
 
+	// One call per layer that keeps per-connection state, each matched by a
+	// call in sessionLost.
+	c.stream.opened(c, conn) // subscribes again; the snapshot is the first reply
+
 	w := *welcome
 	c.setState(StateChange{State: StateOpen, Welcome: &w})
 	c.openedOne.Do(func() { close(c.opened) })
@@ -689,14 +699,22 @@ func (c *Client) sessionLost() {
 	c.mu.Lock()
 	c.conn = nil
 	c.mu.Unlock()
+	c.stream.lost()
 }
 
 // route takes one inbound envelope of an open session, on the connection
 // goroutine, in wire order. Connection-level consumers that must see a frame
 // before (or instead of) the handlers act here; what handlers should see is
 // passed on with deliver.
+//
+// The stream gate decides the order: it holds stream envelopes back while a
+// snapshot is outstanding and releases them behind it (subscribe.go). A layer
+// that only needs to see envelopes as the handlers do, in that gated order,
+// belongs in dispatch instead.
 func (c *Client) route(env protocol.Envelope) {
-	c.deliver(func() { c.dispatch(env) })
+	for _, e := range c.stream.gate(env) {
+		c.deliver(func() { c.dispatch(e) })
+	}
 }
 
 // deliver queues fn for the delivery goroutine, behind everything queued before
@@ -733,6 +751,8 @@ func (c *Client) dispatch(env protocol.Envelope) {
 	for _, h := range all {
 		h.fn(env)
 	}
+	// Typed layers, after the raw handlers.
+	c.dispatchStream(env)
 }
 
 // notifyState calls the state handlers; delivery goroutine only.
