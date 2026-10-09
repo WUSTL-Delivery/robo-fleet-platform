@@ -5,7 +5,16 @@ import math
 import pytest
 from sensor_msgs.msg import BatteryState, NavSatFix, NavSatStatus
 
-from fleet_agent.conversions import battery_from_state, build_manifest, clamp_twist, pose_from_fix
+from fleet_agent.conversions import (
+    battery_from_state,
+    build_manifest,
+    channel_names,
+    clamp_twist,
+    decode_channel_data,
+    encode_channel_data,
+    help_context,
+    pose_from_fix,
+)
 
 
 def _fix(lat, lon, alt=float("nan"), status=NavSatStatus.STATUS_FIX):
@@ -22,6 +31,8 @@ def test_manifest_declares_only_what_is_configured():
         "drive": {"type": "twist", "max_v_mps": 1.5, "max_w_radps": 2.0},
         "battery": {},
     }
+    # Declared in the order configured; no channels, no member.
+    assert build_manifest(channels=["jobs", "status"]) == {"channels": ["jobs", "status"]}
 
 
 @pytest.mark.parametrize(
@@ -92,3 +103,52 @@ def test_non_finite_twist_becomes_a_stop(bad):
 def test_a_stop_is_plain_zero():
     stop = clamp_twist(-0.0, -0.0, -0.0, max_v_mps=1.0, max_w_radps=1.5)
     assert stop == (0.0, 0.0, 0.0) and not any(math.copysign(1.0, c) < 0 for c in stop)
+
+
+def test_channel_names_must_be_channel_names_and_topic_tokens():
+    assert channel_names([]) == ([], set())
+    assert channel_names(["jobs", "delivery_status", "a1"], ["jobs"]) == (["jobs", "delivery_status", "a1"], {"jobs"})
+
+
+@pytest.mark.parametrize(
+    "channels, raw",
+    [
+        (["edge.report"], []),  # a valid channel name, but '.' cannot be in a topic name
+        (["edge-report"], []),
+        (["1st"], []),  # a topic token cannot start with a digit
+        (["a__b"], []),
+        (["trailing_"], []),
+        (["Jobs"], []),
+        ([""], []),
+        (["a" * 65], []),
+        (["jobs", "jobs"], []),
+        (["jobs"], ["status"]),  # raw, but not bridged
+    ],
+)
+def test_channel_names_rejects(channels, raw):
+    with pytest.raises(ValueError):
+        channel_names(channels, raw)
+
+
+@pytest.mark.parametrize("value", [{"a": [1, 2.5, None, True]}, [], "caf\u00e9 \u2603", 0, False, None])
+def test_channel_data_round_trips_as_json_text(value):
+    assert decode_channel_data(encode_channel_data(value)) == value
+
+
+def test_channel_data_text_is_compact_and_keeps_unicode():
+    assert encode_channel_data({"a": 1, "b": ["\u00e9"]}) == '{"a":1,"b":["\u00e9"]}'
+
+
+@pytest.mark.parametrize("text", ["", "{not json", "NaN", "[Infinity]", "-Infinity", "{'a': 1}"])
+def test_channel_data_must_be_json(text):
+    with pytest.raises(ValueError):
+        decode_channel_data(text)
+
+
+def test_help_context_is_an_object_or_nothing():
+    assert help_context("") is None
+    assert help_context("  ") is None
+    assert help_context('{"attempts": 3}') == {"attempts": 3}
+    for bad in ("[1]", '"text"', "3", "null", "{nope", "NaN"):
+        with pytest.raises(ValueError):
+            help_context(bad)

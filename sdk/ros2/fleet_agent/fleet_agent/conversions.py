@@ -12,12 +12,27 @@ ROS distro's ``sensor_msgs`` and are testable without a running graph.
 
 from __future__ import annotations
 
+import json
 import math
-from typing import Any, Optional
+import re
+from typing import Any, Optional, Sequence
 
-from fleet import geo_pose
+from fleet import CHANNEL_NAME_PATTERN, geo_pose
 
-__all__ = ["battery_from_state", "build_manifest", "clamp_twist", "pose_from_fix"]
+__all__ = [
+    "battery_from_state",
+    "build_manifest",
+    "channel_names",
+    "clamp_twist",
+    "decode_channel_data",
+    "encode_channel_data",
+    "help_context",
+    "pose_from_fix",
+]
+
+#: A channel name that is also one token of a ROS topic name: it starts with a
+#: letter and has no '.', no '-', no doubled and no trailing underscore.
+_TOPIC_TOKEN = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)*$")
 
 #: ``sensor_msgs/NavSatStatus.STATUS_NO_FIX``.
 _STATUS_NO_FIX = -1
@@ -29,12 +44,14 @@ def build_manifest(
     max_v_mps: float = 0.0,
     max_w_radps: float = 0.0,
     battery: bool = False,
+    channels: Sequence[str] = (),
 ) -> dict[str, Any]:
     """The capability manifest for this robot (``defs.schema.json#/$defs/manifest``).
 
     The console renders only what the manifest declares, so a capability is
     listed only when the node is configured for it: ``drive`` when ``drive_type``
-    is set, ``battery`` when a battery topic is. Raises ValueError for a drive
+    is set, ``battery`` when a battery topic is, ``channels`` when any are bridged
+    (declaring a channel is what makes its broadcasts reach this robot). Raises ValueError for a drive
     the schema would reject, so a bad parameter file fails at startup and not
     as a server error after connecting.
     """
@@ -52,7 +69,70 @@ def build_manifest(
         }
     if battery:
         manifest["battery"] = {}
+    if channels:
+        manifest["channels"] = list(channels)
     return manifest
+
+
+def channel_names(channels: Sequence[str], raw_channels: Sequence[str] = ()) -> tuple[list[str], set[str]]:
+    """The ``channels`` and ``raw_channels`` parameters, checked: (names in order, the raw ones).
+
+    A name becomes part of two topic names (``fleet/ch/<name>/in`` and ``/out``),
+    so it must be valid twice: as a protocol channel name and as a ROS topic
+    token. The protocol also allows a leading digit, '.' and '-'; ROS does not,
+    and the node does not rename channels behind the application's back. Raises
+    ValueError for a name that is not both, a duplicate, or a raw channel that
+    is not bridged at all.
+    """
+    names: list[str] = []
+    for name in channels:
+        if not isinstance(name, str) or not CHANNEL_NAME_PATTERN.match(name) or not _TOPIC_TOKEN.match(name):
+            raise ValueError(
+                f"channels: {name!r} cannot be bridged; a name must start with a lowercase letter and "
+                "hold only lowercase letters, digits and single underscores (at most 64 characters)"
+            )
+        if name in names:
+            raise ValueError(f"channels: {name!r} is listed twice")
+        names.append(name)
+    for name in raw_channels:
+        if name not in names:
+            raise ValueError(f"raw_channels: {name!r} is not in channels")
+    return names, set(raw_channels)
+
+
+def encode_channel_data(data: Any) -> str:
+    """Channel data as the JSON text carried in ``ChannelMsg.data``."""
+    return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+
+
+def _no_constant(name: str) -> Any:
+    raise ValueError(f"{name} is not JSON")
+
+
+def decode_channel_data(text: str) -> Any:
+    """The JSON value in ``ChannelMsg.data``. Raises ValueError if it is not JSON.
+
+    NaN and Infinity are refused although Python's parser accepts them: they
+    are not JSON, and the server would reject the publish.
+    """
+    return json.loads(text, parse_constant=_no_constant)
+
+
+def help_context(text: str) -> Optional[dict[str, Any]]:
+    """``RequestHelp.context`` as the help.request context: None when empty.
+
+    Raises ValueError unless it is the JSON text of an object, which is the only
+    shape the protocol accepts.
+    """
+    if not text.strip():
+        return None
+    try:
+        context = decode_channel_data(text)
+    except ValueError as e:
+        raise ValueError(f"context is not JSON ({e})") from None
+    if not isinstance(context, dict):
+        raise ValueError("context must be the JSON text of an object, for example {\"attempts\": 3}")
+    return context
 
 
 def clamp_twist(

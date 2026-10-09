@@ -40,6 +40,34 @@ fleet_agent:
     #
     # Lease state is latched on fleet/lease (fleet_agent_msgs/Lease); no parameter.
 
+    # Twist over a direct WebRTC data channel, next to the bus. "auto": used when
+    # aiortc is installed (pip install './sdk/python[webrtc]') and the operator's
+    # console offers it; otherwise, and with "off", twist arrives over the bus only.
+    # Either way it goes through the same lease check and the same deadman.
+    data_channel: auto
+
+    # Channels: the application node's way to talk to the rest of the fleet (a
+    # dispatcher, another robot) without a websocket. Each name gets two topics of
+    # type fleet_agent_msgs/ChannelMsg, with the data as JSON text:
+    #   /fleet/ch/<name>/in    what arrived for this robot
+    #   /fleet/ch/<name>/out   what the application sends (`to` empty = broadcast)
+    # The names are also declared in the manifest, which is what makes broadcasts
+    # on them reach this robot. A name must start with a lowercase letter and hold
+    # only lowercase letters, digits and single underscores (it is part of a topic
+    # name). Default: none.
+    channels: [assignment, delivery_status]
+    # Acked sends. A sender that wants a receipt publishes {"seq": n, "data": ...}
+    # and re-sends until it hears {"ack": n}. By default fleet_agent answers for
+    # the application: the in topic carries the inner data once per send, with
+    # `acked: true`, and the ack is sent when at least one node subscribes to the
+    # in topic (never when nothing listens). List a channel here to get the
+    # {"seq", "data"} message as it is, repeats included, and publish the
+    # {"ack": n} reply from the application instead. Default: none.
+    # raw_channels: [assignment]
+    #
+    # The service /fleet/request_help (fleet_agent_msgs/RequestHelp) raises the
+    # robot's hand for an operator; no parameter.
+
     # Telemetry sources. Leave a topic empty if the robot does not have it.
     # fix_topic (sensor_msgs/NavSatFix) becomes a geographic pose; a robot without
     # GPS leaves it empty and is online without a pose.

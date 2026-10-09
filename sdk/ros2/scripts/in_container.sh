@@ -31,7 +31,17 @@ step "installing the Python SDK (sdk/python)"
 # The same two commands as README.md step 1. Ubuntu 22.04's pip (22.0) cannot build
 # the SDK: its isolated build environment still sees the system's old `packaging`.
 python3 -m pip install --quiet --user --upgrade pip
-python3 -m pip install --quiet --user "${WORK}/repo/sdk/python"
+# With the webrtc extra (aiortc), so every test here, the deadman tests included,
+# runs the node the way a robot with data_channel: auto runs it. aiortc and its
+# codec library come as binary wheels; where there is none for the platform the
+# install fails, and the node is then tested the way it would run there: bus only.
+if python3 -m pip install --quiet --user "${WORK}/repo/sdk/python[webrtc]"; then
+    export FLEET_AGENT_EXPECT_WEBRTC=1
+    python3 -c 'import aiortc, platform; print("aiortc", aiortc.__version__, "on", platform.machine(), "python", platform.python_version())'
+else
+    printf '\n!! the webrtc extra did not install on %s; testing without it (twist over the bus only)\n\n' "$(uname -m)"
+    python3 -m pip install --quiet --user "${WORK}/repo/sdk/python"
+fi
 
 step "building fleet-server ($(go version | cut -d' ' -f3))"
 (cd "${WORK}/repo/server" && go build -o "${WORK}/bin/fleet-server" ./cmd/fleet-server)

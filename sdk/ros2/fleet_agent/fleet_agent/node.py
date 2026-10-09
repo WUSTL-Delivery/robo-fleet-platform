@@ -22,17 +22,33 @@ purpose: the SDK's timer on the link thread, and the gate's watchdog on a ROS
 steady-clock timer on the ROS thread. Either one stops the robot alone, so a
 blocked or dead link thread cannot leave it moving, and neither needs the
 server. The lease state is latched on ``fleet/lease`` (fleet_agent_msgs/Lease).
+With ``data_channel: auto`` and aiortc installed the SDK also takes twist from
+the operator's WebRTC data channel; it reaches ``_on_twist`` the same way.
+
+Channels (the ``channels`` parameter) are the application node's way in and out
+without a socket: what arrives on channel ``<name>`` is published on
+``fleet/ch/<name>/in`` and what the application publishes on
+``fleet/ch/<name>/out`` is sent, both as fleet_agent_msgs/ChannelMsg with the
+data as JSON text. An acked send is answered here unless the channel is in
+``raw_channels`` (``_on_acked``). ``fleet/request_help``
+(fleet_agent_msgs/RequestHelp) raises the robot's hand. Nothing on the ROS
+thread waits for the network: an out message is handed to the link thread and
+forgotten, and the service callback is a coroutine, in a callback group of its
+own, that the executor resumes when the link thread has answered.
 
 Parameters (config/fleet_agent.example.yaml documents each):
 ``url``, ``name``, ``token_file``, ``enroll_key``, ``drive.type``,
 ``drive.max_v_mps``, ``drive.max_w_radps``, ``cmd_vel.topic``,
-``cmd_vel.deadman_ms``, ``telemetry.fix_topic``, ``telemetry.battery_topic``,
-``telemetry.rate_hz``, ``telemetry.pose_timeout_s``.
+``cmd_vel.deadman_ms``, ``data_channel``, ``channels``, ``raw_channels``,
+``telemetry.fix_topic``, ``telemetry.battery_topic``, ``telemetry.rate_hz``,
+``telemetry.pose_timeout_s``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import logging
 import os
 import signal
 import socket
@@ -42,24 +58,69 @@ from typing import Any, Optional
 
 import rclpy
 from geometry_msgs.msg import Twist
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.clock import Clock, ClockType
 from rclpy.exceptions import InvalidParameterTypeException
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
+from rclpy.task import Future
 from sensor_msgs.msg import BatteryState, NavSatFix
 
-from fleet import ConnectionState, FileTokenStore, FleetClientError, Robot, StateChange
+from fleet import (
+    ChannelTargetNotFound,
+    ConnectionState,
+    Envelope,
+    FileTokenStore,
+    FleetClientError,
+    Robot,
+    StateChange,
+)
 from fleet.robot import LeaseChange, TwistCommand
-from fleet_agent_msgs.msg import Lease
+from fleet_agent_msgs.msg import ChannelMsg, Lease
+from fleet_agent_msgs.srv import RequestHelp
 
 from . import __version__
-from .conversions import battery_from_state, build_manifest, pose_from_fix
+from .conversions import (
+    battery_from_state,
+    build_manifest,
+    channel_names,
+    decode_channel_data,
+    encode_channel_data,
+    help_context,
+    pose_from_fix,
+)
 from .gate import TwistGate
 
 #: Where the lease state is latched, relative to the node's namespace.
 LEASE_TOPIC = "fleet/lease"
+
+#: The service that raises the robot's hand, relative to the node's namespace.
+HELP_SERVICE = "fleet/request_help"
+
+#: Channel ``name`` is bridged to ``fleet/ch/<name>/in`` and ``fleet/ch/<name>/out``.
+CHANNEL_TOPIC_PREFIX = "fleet/ch"
+
+#: Reliable, keep last 10, on both channel topics: every message matters, a little.
+CHANNEL_QOS_DEPTH = 10
+
+#: Out messages handed to the link thread and not yet sent or failed. Past this the
+#: application is publishing faster than the link takes them, and new ones are dropped.
+MAX_PENDING_OUT = 256
+
+#: How long the server's refusal of a publish is waited for, to log it with the
+#: channel and the target (the link thread waits, never the ROS thread).
+PUBLISH_ERROR_WINDOW_S = 0.5
+
+#: Envelope ids of this node's channel publishes start with this, so the general
+#: server-error log can leave their refusals to the publish that is waiting for them.
+_OUT_ID_PREFIX = "fa-out-"
+
+#: fleet/request_help answers "timeout" if the link thread has not taken the request
+#: after this long (it is blocked or gone; an open link takes it in milliseconds).
+HELP_TIMEOUT_S = 2.0
 
 #: Latched: reliable, and the last message is kept for subscribers that join late.
 LATCHED_QOS = QoSProfile(
@@ -76,6 +137,17 @@ _SDK_STOPS = {
 #: Read for the enrollment key when the ``enroll_key`` parameter is empty, so the
 #: secret can stay out of parameter files (the same variable the Python SDK examples use).
 ENROLL_KEY_ENV = "FLEET_ENROLL_KEY"
+
+
+class _NotAccepted(Exception):
+    """An acked message this node will not answer for: nobody is there to receive it."""
+
+
+class _QuietNotAccepted(logging.Filter):
+    """Keeps the SDK from logging a traceback for every ``_NotAccepted`` (the node logs one line itself)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not (record.exc_info and isinstance(record.exc_info[1], _NotAccepted))
 
 
 class _Latest:
@@ -117,7 +189,8 @@ class _Latest:
 
 
 class FleetAgent(Node):
-    """Connects this robot to fleet-server: telemetry out, operator twist in, lease state latched."""
+    """Connects this robot to fleet-server: telemetry out, operator twist in, lease state
+    latched, channels as topics, help as a service."""
 
     def __init__(self, **node_args: Any) -> None:
         super().__init__("fleet_agent", **node_args)
@@ -135,6 +208,15 @@ class FleetAgent(Node):
         if not 100 <= deadman_ms <= 1000:
             raise ValueError(f"cmd_vel.deadman_ms must be between 100 and 1000, got {deadman_ms!r}")
 
+        data_channel = self.declare_parameter("data_channel", "auto").value
+        if data_channel not in ("auto", "off"):
+            raise ValueError(f"data_channel must be 'auto' or 'off', got {data_channel!r}")
+        # Declared by type: an empty list as the default would not say what it is a list of.
+        channels, raw_channels = channel_names(
+            self.declare_parameter("channels", Parameter.Type.STRING_ARRAY).value or [],
+            self.declare_parameter("raw_channels", Parameter.Type.STRING_ARRAY).value or [],
+        )
+
         fix_topic = self.declare_parameter("telemetry.fix_topic", "").value
         battery_topic = self.declare_parameter("telemetry.battery_topic", "").value
         rate_hz = self.declare_parameter("telemetry.rate_hz", 1.0).value
@@ -148,6 +230,7 @@ class FleetAgent(Node):
             max_v_mps=float(max_v_mps),
             max_w_radps=float(max_w_radps),
             battery=bool(battery_topic),
+            channels=channels,
         )
 
         self._latest = _Latest()
@@ -169,8 +252,12 @@ class FleetAgent(Node):
             # cmd_vel.deadman_ms is the deadline for zero to be ON the topic, so both
             # timers (this one and the gate's watchdog) fire a little before it.
             deadman_ms=deadman_ms - int(TwistGate.EARLY_S * 1000),
+            # auto: on when aiortc is installed. No ice_servers on purpose: leaving
+            # them unset lets the SDK decide where they come from.
+            data_channel=None if data_channel == "auto" else False,
         )
         self._robot.client.on_state(self._on_state)
+        self._robot.client.on("error", self._on_server_error)
 
         self._connected = False
         self._ended: Optional[LeaseChange] = None
@@ -198,10 +285,35 @@ class FleetAgent(Node):
             self._watchdog = self.create_timer(
                 TwistGate.TICK_S, self.gate.tick, clock=Clock(clock_type=ClockType.STEADY_TIME)
             )
+            if self._robot.data_channel_enabled:
+                via = "the bus or a WebRTC data channel"
+            elif data_channel == "off":
+                via = "the bus only (data_channel is off)"
+            else:
+                via = "the bus only (aiortc is not installed)"
             self.get_logger().info(
                 f"operator twist goes to '{self._cmd_vel_pub.topic_name}', limited to "
-                f"{max_v_mps} m/s and {max_w_radps} rad/s, deadman {deadman_ms} ms"
+                f"{max_v_mps} m/s and {max_w_radps} rad/s, deadman {deadman_ms} ms; it arrives over {via}"
             )
+
+        self._out_lock = threading.Lock()
+        self._out_pending = 0
+        self._out_seq = 0
+        self._in_pubs: dict[str, Any] = {}
+        for channel in channels:
+            self._bridge_channel(channel, raw=channel in raw_channels)
+        if channels:
+            # The SDK logs a traceback when an acked handler raises; _on_acked raises
+            # on purpose and logs one line of its own.
+            logging.getLogger("fleet.channel").addFilter(_QuietNotAccepted())
+
+        self._steady = Clock(clock_type=ClockType.STEADY_TIME)
+        # A group of its own. The callback is a coroutine, and a callback group stays
+        # taken until its coroutine finishes: in the node's default group a pending
+        # help request would keep every timer from running, the cmd_vel watchdog first.
+        self._help_srv = self.create_service(
+            RequestHelp, HELP_SERVICE, self._on_request_help, callback_group=MutuallyExclusiveCallbackGroup()
+        )
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._link_thread, name="fleet-link", daemon=True)
@@ -248,7 +360,114 @@ class FleetAgent(Node):
     def _on_battery(self, msg: BatteryState) -> None:
         self._latest.set_battery(battery_from_state(msg))
 
+    def _bridge_channel(self, name: str, *, raw: bool) -> None:
+        """Creates the two topics of channel ``name`` and registers its SDK handlers."""
+        topic = f"{CHANNEL_TOPIC_PREFIX}/{name}"
+        pub = self._in_pubs[name] = self.create_publisher(ChannelMsg, f"{topic}/in", CHANNEL_QOS_DEPTH)
+        sub = self.create_subscription(
+            ChannelMsg, f"{topic}/out", lambda msg: self._on_channel_out(name, msg), CHANNEL_QOS_DEPTH
+        )
+        channel = self._robot.channel(name)
+        channel.on_message(lambda sender, data: self._channel_in(name, sender, data, acked=False))
+        if not raw:
+            channel.on_acked(lambda sender, data: self._on_acked(name, sender, data))
+        self.get_logger().info(
+            f"channel '{name}': in on '{pub.topic_name}', out on '{sub.topic_name}', acked sends are "
+            + ("passed through for the application to answer" if raw else "answered by fleet_agent")
+        )
+
+    def _on_channel_out(self, name: str, msg: ChannelMsg) -> None:
+        log = self.get_logger()
+        try:
+            data = decode_channel_data(msg.data)
+        except ValueError as e:
+            log.warning(f"channel '{name}': dropped an out message whose data is not JSON ({e})")
+            return
+        # At-most-once, like the bus itself: nothing is queued for a link that is down.
+        if not self._connected:
+            log.warning(
+                f"channel '{name}': dropped an out message, not connected to fleet-server",
+                throttle_duration_sec=5.0,
+            )
+            return
+        with self._out_lock:
+            if self._out_pending >= MAX_PENDING_OUT:
+                full = True
+            else:
+                full = False
+                self._out_pending += 1
+                self._out_seq += 1
+                ref = f"{_OUT_ID_PREFIX}{self._out_seq}"
+        if full:
+            log.warning(
+                f"channel '{name}': dropped an out message, {MAX_PENDING_OUT} are still waiting to be sent",
+                throttle_duration_sec=5.0,
+            )
+            return
+        if self._submit(self._publish_channel(name, data, msg.to or None, ref)) is None:
+            with self._out_lock:
+                self._out_pending -= 1
+
+    async def _on_request_help(
+        self, request: RequestHelp.Request, response: RequestHelp.Response
+    ) -> RequestHelp.Response:
+        # A coroutine in its own callback group: the executor keeps running everything
+        # else (the cmd_vel watchdog included) while the link thread does the sending.
+        # A second request waits for this one.
+        def answer(code: str, message: str) -> RequestHelp.Response:
+            response.accepted = not code
+            response.code, response.message = code, message
+            log = self.get_logger()
+            if code:
+                log.warning(f"help request '{request.reason[:64]}' not sent: {code}: {message}")
+            else:
+                log.info(f"help requested: {request.reason}")
+            return response
+
+        try:
+            if not 1 <= len(request.reason) <= 256:
+                raise ValueError("reason must be 1 to 256 characters")
+            context = help_context(request.context)
+        except ValueError as e:
+            return answer(RequestHelp.Response.CODE_INVALID, str(e))
+        if not self._connected:
+            return answer(RequestHelp.Response.CODE_OFFLINE, "not connected to fleet-server")
+
+        done = Future()
+
+        def settle(outcome: Optional[tuple[str, str]]) -> None:  # either thread
+            if not done.done():
+                done.set_result(outcome)
+                executor = self.executor
+                if executor is not None:
+                    executor.wake()  # resume this coroutine now, not at the next timer
+
+        sending = self._submit(self._send_help(request.reason, context))
+        if sending is None:
+            return answer(RequestHelp.Response.CODE_OFFLINE, "the link to fleet-server has ended")
+        sending.add_done_callback(
+            lambda f: settle(None if f.cancelled() or f.exception() is not None else f.result())
+        )
+        # In the node's default group (not this service's, which is taken until we return).
+        timeout = self.create_timer(HELP_TIMEOUT_S, lambda: settle(None), clock=self._steady)
+        try:
+            outcome = await done
+        finally:
+            self.destroy_timer(timeout)
+        if outcome is None:
+            sending.cancel()
+            return answer(RequestHelp.Response.CODE_TIMEOUT, "the link thread did not take the request")
+        return answer(*outcome)
+
     # ------------------------------------------------------------------ either thread
+
+    def _submit(self, coro: Any) -> Optional[concurrent.futures.Future]:
+        """Hands a coroutine to the link thread; None if that thread's loop is gone."""
+        try:
+            return asyncio.run_coroutine_threadsafe(coro, self._loop)
+        except RuntimeError:
+            coro.close()
+            return None
 
     def _publish_cmd_vel(self, x: float, y: float, wz: float) -> None:
         msg = Twist()
@@ -281,6 +500,62 @@ class FleetAgent(Node):
         else:
             self.gate.stop(_SDK_STOPS.get(cmd.source, cmd.source))
 
+    def _channel_in(self, name: str, sender: str, data: Any, *, acked: bool) -> None:
+        msg = ChannelMsg()
+        msg.stamp = self.get_clock().now().to_msg()
+        msg.sender = sender
+        msg.data = encode_channel_data(data)
+        msg.acked = acked
+        self._in_pubs[name].publish(msg)
+
+    def _on_acked(self, name: str, sender: str, data: Any) -> None:
+        # Returning tells the sender "accepted" ({ack: seq}, sent by the SDK); raising
+        # tells it nothing, and its next re-send is tried afresh. The SDK shows each
+        # acked send here once, so the application never sees a repeat.
+        pub = self._in_pubs[name]
+        if pub.get_subscription_count() == 0:
+            # Nobody would receive it. Acking would tell a dispatcher the job was
+            # taken when no application is running.
+            self.get_logger().warning(
+                f"channel '{name}': not acking a message from {sender}, nothing subscribes to "
+                f"'{pub.topic_name}'",
+                throttle_duration_sec=5.0,
+            )
+            raise _NotAccepted(name)
+        self._channel_in(name, sender, data, acked=True)
+
+    async def _publish_channel(self, name: str, data: Any, to: Optional[str], ref: str) -> None:
+        log = self.get_logger()
+        try:
+            await self._robot.channel(name).publish(data, to=to, id=ref, wait=PUBLISH_ERROR_WINDOW_S)
+        except ChannelTargetNotFound:
+            log.warning(f"channel '{name}': {to} is not connected, the message was dropped")
+        except FleetClientError as e:
+            log.warning(f"channel '{name}': the message was not sent: {e}")
+        finally:
+            with self._out_lock:
+                self._out_pending -= 1
+
+    async def _send_help(self, reason: str, context: Optional[dict[str, Any]]) -> tuple[str, str]:
+        """Sends help.request; returns (code, message) for the service, code empty when sent."""
+        try:
+            await self._robot.request_help(reason, context)
+        except ValueError as e:
+            return RequestHelp.Response.CODE_INVALID, str(e)
+        except FleetClientError as e:
+            return RequestHelp.Response.CODE_OFFLINE, str(e)
+        self._publish_lease()  # mode is now help, unless an operator is already driving
+        return "", "help.request sent"
+
+    def _on_server_error(self, env: Envelope) -> None:
+        # Everything the server refuses, so that nothing fails silently: a rate
+        # limit, an oversized payload, a refused token.
+        p = env["payload"]
+        ref = p.get("ref")
+        if isinstance(ref, str) and ref.startswith(_OUT_ID_PREFIX):
+            return  # _publish_channel is waiting for this one and logs it with the channel
+        self.get_logger().warning(f"fleet-server answered {p.get('code')}: {p.get('message')}")
+
     def _on_lease(self, change: LeaseChange) -> None:
         # The SDK has already stopped the robot if this ends or replaces a lease.
         log = self.get_logger()
@@ -288,7 +563,9 @@ class FleetAgent(Node):
             log.info(f"lease {change.lease_id} granted to operator {change.operator_id}")
         else:
             self._ended = change
-            log.info(f"lease {change.lease_id} ended: {change.reason}")
+            # No reason: it ended while this robot was disconnected, and the welcome
+            # after the reconnect only says that it is gone.
+            log.info(f"lease {change.lease_id} ended: {change.reason or 'while disconnected (reason unknown)'}")
         if self.gate is not None:
             self.gate.set_lease(change.lease_id if change.granted else None)
         self._publish_lease()

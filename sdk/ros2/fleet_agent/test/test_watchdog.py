@@ -8,6 +8,9 @@ operator, and take one thread away while the robot is being driven:
 - the link thread dies outright: the ROS watchdog must stop the robot;
 - the ROS executor stops spinning: the SDK's deadman must stop the robot.
 
+Also here, because it needs the same rig: a help request made while the link
+thread is stuck must not hold up the ROS executor (and with it the watchdog).
+
 The operator keeps sending twist throughout, so nothing but the surviving timer
 can be what publishes zero.
 
@@ -146,6 +149,35 @@ def test_dead_link_thread_is_stopped_by_the_ros_watchdog(rig):
     r.agent._thread.join(5)
     assert not r.agent._thread.is_alive() and r.agent.finished
     assert r.agent.crashed is not None
+
+
+def test_help_request_does_not_block_the_executor_on_a_stuck_link(rig):
+    r = rig("help_stalled")
+    # Stands for the cmd_vel watchdog: a timer in the node's default callback group.
+    ticks = []
+    r.agent.create_timer(0.02, lambda: ticks.append(time.monotonic()))
+
+    async def scenario():
+        async with harness.watching(r.server) as watcher:
+            await watcher.robot(r.name)
+            await r.rec.lease(lambda m: m.connected)
+            # The link thread stops taking work (it would send the request).
+            r.agent._loop.call_soon_threadsafe(time.sleep, 4.0)
+            await asyncio.sleep(0.2)
+            began = time.monotonic()
+            answer = await harness.request_help(r.rec.node, "stuck")
+            return began, answer, time.monotonic()
+
+    began, answer, ended = asyncio.run(scenario())
+    stall_s = r.rec.host_stall_ms(began) / 1000
+    # The request is given up after HELP_TIMEOUT_S (2 s), and says so.
+    assert (answer.accepted, answer.code) == (False, "timeout"), answer
+    assert 1.5 < ended - began < 3.5 + stall_s, ended - began
+    # All that time the node's other callbacks kept running: the service callback
+    # was waiting, not sitting on the ROS thread.
+    during = [t for t in ticks if began <= t <= ended]
+    gaps = [b - a for a, b in zip([began, *during], [*during, ended])]
+    assert max(gaps) < 0.2 + stall_s, (max(gaps), len(during))
 
 
 def test_stalled_ros_thread_is_stopped_by_the_sdk_deadman(rig):

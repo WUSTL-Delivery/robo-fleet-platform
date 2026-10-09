@@ -8,12 +8,15 @@ bound is extended by the time the host froze the test process, if it did
 (Recorder.host_stall_ms); the printed line shows both numbers.
 
 Covered here: twist stops arriving (deadman), the lease is handed back, the
-network goes silent with no close (cable pulled), the socket is reset, and the
-server is killed. A stalled or dead SDK thread is covered in test_watchdog.py.
+network goes silent with no close (cable pulled), the socket is reset, the
+server is killed, the server comes back without the lease, and twist over the
+WebRTC data channel (with aiortc installed). A stalled or dead SDK thread is
+covered in test_watchdog.py.
 """
 
 import asyncio
 import contextlib
+import importlib.util
 import os
 import sys
 import time
@@ -223,5 +226,94 @@ class TestTeleop(unittest.TestCase):
                 self.assertLessEqual((stopped - killed) * 1000, DEADMAN_MS + stall_ms, rec.timeline(killed - 0.3))
             finally:
                 driving.cancel()
+
+        self._teleop(server, body)
+
+    def test_6_a_lease_the_restarted_server_does_not_know_is_dropped(self, server, proxy):
+        rec = self.rec
+        server.up()  # test_5 left it dead; leases live in memory, so it comes back with none
+
+        async def body(op, lease, start):
+            driving = asyncio.ensure_future(op.drive(lease, 0.5))
+            try:
+                await rec.cmd(is_moving, since=start)
+                killed = time.monotonic()
+                server.kill()
+                down = await rec.lease(lambda m: not m.connected, since=killed)
+                # While the link is down the robot cannot know: it is stopped, the lease stands.
+                self.assertTrue(down.held)
+                server.up()
+                # The welcome of the new connection states no lease, and the robot believes it.
+                ended = await rec.lease(lambda m: m.connected and not m.held, since=killed)
+                self.assertEqual((ended.lease_id, ended.operator_id), (lease, ""))
+                # Nobody told the robot why, so it says nothing and assumes it needs help.
+                self.assertEqual((ended.reason, ended.mode), ("", "help"))
+                self.assertFalse((await rec.latched_lease()).held)
+                # Twist under the old lease moves nothing (op.drive ended with its link; send by hand).
+                for _ in range(8):
+                    with contextlib.suppress(harness.FleetClientError):
+                        await op.twist(lease, 0.5)
+                    await asyncio.sleep(0.1)
+                last_moving, _ = rec.final_stop(killed)
+                self.assertLess(last_moving, killed + IMMEDIATE_S + rec.host_stall_ms(killed) / 1000)
+            finally:
+                driving.cancel()
+
+        self._teleop(server, body)
+
+    def test_7_twist_over_the_webrtc_data_channel_is_clamped_and_the_deadman_holds(self, server, proxy):
+        if importlib.util.find_spec("aiortc") is None:
+            self.skipTest("needs the webrtc extra (aiortc): the node takes twist over the bus only")
+        rec = self.rec
+
+        async def body(op, lease, start):
+            # No twist is ever sent over the bus here: what moves the robot came peer to peer.
+            channel = await op.data_channel(lease)
+            try:
+                for _ in range(3):  # unreliable by contract: one datagram may be lost
+                    channel.twist(0.4, 0.2)
+                    await asyncio.sleep(0.02)
+                _, inside = await rec.cmd(is_moving, since=start)
+                self.assertEqual(inside, pytest.approx((0.4, 0.0, 0.2)))
+                mark = time.monotonic()
+                channel.twist(5.0, -9.0)
+                _, clamped = await rec.cmd(is_moving, since=mark)
+                self.assertEqual(clamped, (MAX_V, 0.0, -MAX_W))
+                await rec.cmd(is_zero, since=mark)
+
+                # The same deadman as on the bus: 20 Hz for a second, then silence.
+                await asyncio.sleep(0.4)
+                stream = time.monotonic()
+                for _ in range(20):
+                    channel.twist(0.5, 0.3)
+                    await asyncio.sleep(0.05)
+                await rec.cmd(is_zero, since=stream)
+                self.assertGreaterEqual(rec.moving_count(stream), 18, rec.timeline(stream))
+                gap_ms, stall_ms = rec.stop_gap_ms(stream), rec.host_stall_ms(stream)
+                print(f"data channel deadman: zero {gap_ms:.0f} ms after the last non-zero cmd_vel, host stall {stall_ms:.0f} ms")
+                self.assertLessEqual(gap_ms, DEADMAN_MS + stall_ms, rec.timeline(stream))
+                self.assertGreater(gap_ms, DEADMAN_MS - 100 - stall_ms, rec.timeline(stream))
+
+                # Handback ends it at once, and the channel's twist moves nothing afterwards.
+                await asyncio.sleep(0.4)
+                again = time.monotonic()
+                for _ in range(3):
+                    channel.twist(0.5)
+                    await asyncio.sleep(0.02)
+                await rec.cmd(is_moving, since=again)
+                released = time.monotonic()
+                await op.release(lease)
+                stopped, _ = await rec.cmd(is_zero, since=released)
+                self.assertLess(stopped - released, IMMEDIATE_S + rec.host_stall_ms(released) / 1000)
+                await rec.lease(lambda m: not m.held, since=released)
+                after = time.monotonic()
+                for _ in range(5):
+                    with contextlib.suppress(Exception):  # the robot closes the peer on revoke
+                        channel.twist(0.5)
+                    await asyncio.sleep(0.05)
+                await asyncio.sleep(0.3)
+                self.assertEqual(rec.moving_count(after), 0, rec.timeline(after))
+            finally:
+                await channel.close()
 
         self._teleop(server, body)

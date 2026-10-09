@@ -19,6 +19,11 @@ release), a ``TcpProxy`` to put between the node and the server so the network
 can be blackholed or cut, and a ``Recorder`` that timestamps what the node
 publishes on cmd_vel and fleet/lease.
 
+For channel tests a ``ChannelTap`` plays the application node on one channel
+(subscribes to its in topic, publishes on its out topic), ``Peer`` is another
+client on the bus that sends and collects channel messages, ``request_help``
+calls the help service, and ``go_dispatcher`` builds the Go example dispatcher.
+
 The server binary comes from ``$FLEET_SERVER_BIN`` (scripts/in_container.sh sets
 it) or, failing that, is built with ``go build`` from this checkout's server/.
 """
@@ -39,6 +44,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Optional
 
@@ -49,7 +55,8 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
 from fleet import Backoff, FleetClient, FleetClientError
-from fleet_agent_msgs.msg import Lease
+from fleet_agent_msgs.msg import ChannelMsg, Lease
+from fleet_agent_msgs.srv import RequestHelp
 
 #: Generous: CI runners and emulated containers are slow to discover DDS peers.
 TIMEOUT_S = 30.0
@@ -249,6 +256,13 @@ class TcpProxy:
             return  # one end gave up; the other must not find out until cut()
         for sock in (src, dst):
             try:
+                # shutdown, not only close: the other pump is blocked in recv on one of
+                # these, and closing a socket another thread is reading neither wakes
+                # that thread nor sends the FIN, so the far end would wait for nothing.
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
                 sock.close()
             except OSError:
                 pass
@@ -414,11 +428,150 @@ async def _first(items: list, match: Callable[[Any], bool], since: float, timeou
         await asyncio.sleep(0.005)
 
 
+class ChannelTap:
+    """The application node's side of one channel: listens on its in topic, publishes on its out topic.
+
+    Lives on a node that something else spins (a Recorder's). ``received`` is a
+    list of ``(time.monotonic(), sender, data, acked)`` with the data parsed.
+    """
+
+    def __init__(self, node: Any, name: str, prefix: str = "/fleet/ch") -> None:
+        self.node = node
+        self.in_topic, self.out_topic = f"{prefix}/{name}/in", f"{prefix}/{name}/out"
+        self.received: list[tuple[float, tuple[str, Any, bool]]] = []
+        self._sub = node.create_subscription(ChannelMsg, self.in_topic, self._on_in, 10)
+        self._pub = node.create_publisher(ChannelMsg, self.out_topic, 10)
+
+    def _on_in(self, msg: ChannelMsg) -> None:
+        assert msg.to == "", msg
+        self.received.append((time.monotonic(), (msg.sender, json.loads(msg.data), msg.acked)))
+
+    async def ready(self, timeout: float = TIMEOUT_S) -> "ChannelTap":
+        """Waits until fleet_agent's ends of both topics are discovered and matched."""
+        deadline = time.monotonic() + timeout
+        while self._pub.get_subscription_count() == 0 or self.node.count_publishers(self.in_topic) == 0:
+            if time.monotonic() > deadline:
+                raise AssertionError(f"fleet_agent is not on {self.in_topic} / {self.out_topic} after {timeout} s")
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.2)  # count_publishers is discovery, not yet a match
+        return self
+
+    def send(self, data: Any, to: str = "") -> None:
+        """Publishes ``data``, JSON-encoded, on the out topic; ``to`` empty broadcasts."""
+        self.send_text(json.dumps(data), to)
+
+    def send_text(self, text: str, to: str = "") -> None:
+        self._pub.publish(ChannelMsg(to=to, data=text))
+
+    async def next(
+        self, match: Callable[[tuple[str, Any, bool]], bool] = lambda m: True, since: float = 0.0,
+        timeout: float = TIMEOUT_S,
+    ) -> tuple[str, Any, bool]:
+        """Waits for a message (sender, data, acked) received after ``since`` that satisfies ``match``."""
+        return (await _first(self.received, match, since, timeout, self.in_topic))[1]
+
+    def since(self, since: float) -> list[tuple[str, Any, bool]]:
+        return [m for t, m in list(self.received) if t >= since]
+
+    def close(self) -> None:
+        self.node.destroy_subscription(self._sub)
+        self.node.destroy_publisher(self._pub)
+
+
+async def request_help(node: Any, reason: str, context: str = "", timeout: float = TIMEOUT_S) -> Any:
+    """Calls fleet/request_help from ``node`` (which something else spins); returns the response."""
+    client = node.create_client(RequestHelp, "/fleet/request_help")
+    try:
+        deadline = time.monotonic() + timeout
+        while not client.service_is_ready():
+            if time.monotonic() > deadline:
+                raise AssertionError(f"/fleet/request_help not available after {timeout} s")
+            await asyncio.sleep(0.02)
+        future = client.call_async(RequestHelp.Request(reason=reason, context=context))
+        while not future.done():
+            if time.monotonic() > deadline:
+                raise AssertionError(f"/fleet/request_help did not answer within {timeout} s")
+            await asyncio.sleep(0.005)
+        return future.result()
+    finally:
+        node.destroy_client(client)
+
+
+class Peer:
+    """Another client on the bus (a service, like a dispatcher) that talks to the robot over channels.
+
+    ``messages`` is a list of ``(time.monotonic(), (channel, sender, data))`` for
+    every channel.message this client received, directed or broadcast.
+    """
+
+    def __init__(self, client: FleetClient) -> None:
+        self.client = client
+        self.messages: list[tuple[float, tuple[str, str, Any]]] = []
+        client.on("channel.message", self._on_message)
+
+    @property
+    def id(self) -> str:
+        return self.client.client_id
+
+    def _on_message(self, env: dict[str, Any]) -> None:
+        p = env["payload"]
+        self.messages.append((time.monotonic(), (p["channel"], p["from"], p["data"])))
+
+    async def listen(self, channel: str) -> None:
+        """Subscribes to ``channel``'s broadcasts (directed messages need no subscription)."""
+        await self.client.channel(channel).subscribe()
+
+    async def send(self, channel: str, data: Any, to: Optional[str] = None) -> None:
+        await self.client.channel(channel).publish(data, to=to)
+
+    async def next(
+        self, match: Callable[[tuple[str, str, Any]], bool] = lambda m: True, since: float = 0.0,
+        timeout: float = TIMEOUT_S,
+    ) -> tuple[str, str, Any]:
+        """Waits for a (channel, sender, data) received after ``since`` that satisfies ``match``."""
+        return (await _first(self.messages, match, since, timeout, "channel.message"))[1]
+
+    def since(self, since: float) -> list[tuple[str, str, Any]]:
+        return [m for t, m in list(self.messages) if t >= since]
+
+
+@contextlib.asynccontextmanager
+async def peering(server: FleetServer, name: str = "ros2-test-peer") -> AsyncIterator[Peer]:
+    """Connects a throwaway service client that uses channels, for the duration of the block."""
+    client = FleetClient(
+        server.ws_url,
+        kind="service",
+        name=name,
+        enrollment_key=server.enroll_key,
+        reconnect=Backoff(initial=0.05, max=0.5),
+    )
+    await asyncio.wait_for(client.connect(), TIMEOUT_S)
+    try:
+        yield Peer(client)
+    finally:
+        await client.close()
+
+
+def go_dispatcher(workdir: Path) -> Optional[Path]:
+    """Builds sdk/go/examples/dispatcher into ``workdir``; None when there is no Go toolchain."""
+    if shutil.which("go") is None:
+        return None
+    for parent in Path(__file__).resolve().parents:
+        module = parent / "sdk" / "go"
+        if (module / "examples" / "dispatcher").is_dir():
+            binary = workdir / "dispatcher"
+            subprocess.run(["go", "build", "-o", str(binary), "./examples/dispatcher"], cwd=module, check=True)
+            return binary
+    return None
+
+
 class Operator:
     """An operator client: claims a robot, sends twist under the lease, hands back."""
 
     def __init__(self, client: FleetClient) -> None:
         self._client = client
+        #: The robot of the last claim.
+        self.robot_id: Optional[str] = None
         self._granted: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.errors: list[dict[str, Any]] = []
         client.on("lease.granted", lambda env: self._granted.put_nowait(env["payload"]))
@@ -431,6 +584,7 @@ class Operator:
             while True:
                 granted = await asyncio.wait_for(self._granted.get(), 5)
                 if granted.get("robot_id") == robot_id:
+                    self.robot_id = robot_id
                     return granted["lease_id"]
         except asyncio.TimeoutError:
             raise AssertionError(f"lease on {robot_id} not granted; server said {self.errors}") from None
@@ -450,6 +604,66 @@ class Operator:
     async def release(self, lease_id: str) -> None:
         """Hands the robot back (the lease is revoked with reason ``released``)."""
         await self._client.send("lease.release", {"lease_id": lease_id, "resolution": "resolved"})
+
+    async def data_channel(self, lease_id: str, timeout: float = 15.0) -> "TwistChannel":
+        """Opens the WebRTC twist data channel to the robot of the last claim, the way the console does.
+
+        The offer and the robot's answer go through the server's signal relay
+        (protocol/README.md, "Teleop data plane"); twist then travels peer to
+        peer. Needs aiortc in the test process as well as in the node.
+        """
+        from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
+
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))  # host candidates only
+        channel = pc.createDataChannel("twist", ordered=False, maxRetransmits=0)
+        opened = asyncio.Event()
+        channel.on("open", opened.set)
+        session = uuid.uuid4().hex
+        answers: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        forget = self._client.on("signal", lambda env: answers.put_nowait(env["payload"]))
+        try:
+            await pc.setLocalDescription(await pc.createOffer())
+            offer = {"session": session, "lease_id": lease_id, "type": "offer", "sdp": pc.localDescription.sdp}
+            await self._client.send("signal", {"to": self.robot_id, "kind": "offer", "data": offer})
+            while True:
+                try:
+                    sig = await asyncio.wait_for(answers.get(), timeout)
+                except asyncio.TimeoutError:
+                    raise AssertionError(f"the robot did not answer the WebRTC offer; server said {self.errors}") from None
+                if sig.get("kind") == "answer" and sig["data"].get("session") == session:
+                    break
+            await pc.setRemoteDescription(RTCSessionDescription(sdp=sig["data"]["sdp"], type="answer"))
+            await asyncio.wait_for(opened.wait(), timeout)
+        except BaseException:
+            await pc.close()
+            raise
+        finally:
+            forget()
+        return TwistChannel(pc, channel, lease_id)
+
+
+class TwistChannel:
+    """An open WebRTC twist data channel from an operator to the robot."""
+
+    def __init__(self, pc: Any, channel: Any, lease_id: str) -> None:
+        self._pc, self._channel, self._lease_id = pc, channel, lease_id
+        self._seq = 0
+
+    def twist(self, x_mps: float, w_radps: float = 0.0) -> None:
+        self._seq += 1
+        self._channel.send(
+            json.dumps(
+                {
+                    "lease_id": self._lease_id,
+                    "seq": self._seq,
+                    "linear": {"x_mps": x_mps},
+                    "angular": {"z_radps": w_radps},
+                }
+            )
+        )
+
+    async def close(self) -> None:
+        await self._pc.close()
 
 
 @contextlib.asynccontextmanager

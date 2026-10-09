@@ -3,7 +3,7 @@
 <package format="3">
   <name>fleet_agent</name>
   <version>0.0.1</version>
-  <description>Generic ROS 2 node that connects a robot to fleet-server: manifest from parameters, telemetry from topics, operator twist to cmd_vel behind a lease check and a deadman.</description>
+  <description>Generic ROS 2 node that connects a robot to fleet-server: manifest from parameters, telemetry from topics, operator twist to cmd_vel behind a lease check and a deadman, channels as topics, help as a service.</description>
   <maintainer email="jaxonp808@gmail.com">Jaxon Poentis</maintainer>
   <license>Apache-2.0</license>
 
