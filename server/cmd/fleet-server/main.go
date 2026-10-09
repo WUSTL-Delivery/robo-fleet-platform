@@ -28,6 +28,7 @@ import (
 	"fleetplatform/server/internal/app"
 	"fleetplatform/server/internal/config"
 	"fleetplatform/server/internal/gateway"
+	"fleetplatform/server/internal/signaling"
 	"fleetplatform/server/internal/store"
 	"fleetplatform/server/internal/web"
 )
@@ -91,7 +92,17 @@ func main() {
 		HeartbeatInterval: cfg.HeartbeatInterval(),
 		LeaseTTL:          cfg.LeaseTTL(),
 		SweepEvery:        cfg.SweepEvery(),
+		ICE: signaling.ICE{
+			STUNURLs:      cfg.STUNURLs,
+			TURNURLs:      cfg.TURNURLs,
+			TURNSecret:    cfg.TURNSecret,
+			CredentialTTL: cfg.TURNCredentialTTL(),
+		},
 	}, st)
+	if len(cfg.STUNURLs)+len(cfg.TURNURLs) > 0 {
+		// The secret is never logged.
+		slog.Info("ICE servers for teleop", "stun_urls", cfg.STUNURLs, "turn_urls", cfg.TURNURLs, "turn_credential_ttl_s", cfg.TURNCredentialTTLS)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

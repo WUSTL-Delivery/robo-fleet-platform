@@ -33,3 +33,26 @@ client_msgs_burst: 100
 # map_center: "38.6488,-90.3108"   # lat,lon
 # map_radius_m: 1000               # default 1000 when map_center is set
 # map_lock: false
+
+# ICE servers for the teleop data plane (operator browser <-> robot, WebRTC). The
+# server hands these to robots and operators when they set up a teleop connection;
+# it never relays media itself. Unset (the default), clients are told there are
+# none, which is enough on loopback or one LAN. Across networks, run coturn beside
+# the server: docs/INTEGRATION.md section 7.1.
+# Env: FLEET_STUN_URLS, FLEET_TURN_URLS (both comma-separated), FLEET_TURN_SECRET,
+# FLEET_TURN_CREDENTIAL_TTL_S.
+# stun_urls:
+#   - "stun:turn.example.org:3478"
+# turn_urls:
+#   - "turn:turn.example.org:3478?transport=udp"
+#   - "turn:turn.example.org:3478?transport=tcp"
+#
+# The secret shared with the TURN server (coturn: use-auth-secret plus
+# static-auth-secret). Required with turn_urls. It signs a short-lived credential
+# for each client and is never sent to one. Prefer FLEET_TURN_SECRET over putting
+# it in this file. At least 16 characters.
+# turn_secret: ""
+#
+# How long a TURN credential handed to a client is accepted, in seconds (60 to
+# 86400). Long enough for a teleop session, short enough that a leaked one dies.
+# turn_credential_ttl_s: 3600

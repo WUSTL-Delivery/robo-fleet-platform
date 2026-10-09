@@ -47,8 +47,32 @@ type Config struct {
 	MapRadiusM float64 `yaml:"map_radius_m"` // metres around the centre to show
 	MapLock    bool    `yaml:"map_lock"`     // keep panning and zooming inside that area
 
+	// ICE servers handed to robots and operators for the teleop data plane
+	// (DESIGN.md D2, D11). The server only gives out these addresses plus a
+	// short-lived TURN credential; it never relays media. All unset (the
+	// default): clients are told there are none and connect directly.
+	STUNURLs []string `yaml:"stun_urls"` // "stun:host:port"
+	TURNURLs []string `yaml:"turn_urls"` // "turn:host:port?transport=udp", "turns:..."
+	// TURNSecret is the secret shared with the TURN server (coturn's
+	// static-auth-secret). Required with turn_urls. It never leaves the server.
+	TURNSecret string `yaml:"turn_secret"`
+	// TURNCredentialTTLS is how long a TURN credential minted for a client is
+	// accepted, in seconds.
+	TURNCredentialTTLS int `yaml:"turn_credential_ttl_s"`
+
 	mapLat, mapLon float64 // parsed from MapCenter by validate
 }
+
+// MinTURNSecretLen guards against a guessable TURN shared secret.
+const MinTURNSecretLen = 16
+
+// Bounds on turn_credential_ttl_s. The floor leaves room for clock skew
+// between this server and the TURN server; the ceiling keeps "short-lived"
+// true.
+const (
+	MinTURNCredentialTTLS = 60
+	MaxTURNCredentialTTLS = 24 * 60 * 60
+)
 
 // DefaultMapRadiusM applies when map_center is set without map_radius_m.
 const DefaultMapRadiusM = 1000
@@ -68,6 +92,7 @@ func Default() Config {
 		SweepMs:             1000,
 		ClientMsgsPerSec:    50,
 		ClientMsgsBurst:     100,
+		TURNCredentialTTLS:  3600,
 	}
 }
 
@@ -105,6 +130,10 @@ const (
 	EnvMapCenter           = "FLEET_MAP_CENTER"
 	EnvMapRadiusM          = "FLEET_MAP_RADIUS_M"
 	EnvMapLock             = "FLEET_MAP_LOCK"
+	EnvSTUNURLs            = "FLEET_STUN_URLS" // comma-separated
+	EnvTURNURLs            = "FLEET_TURN_URLS" // comma-separated
+	EnvTURNSecret          = "FLEET_TURN_SECRET"
+	EnvTURNCredentialTTLS  = "FLEET_TURN_CREDENTIAL_TTL_S"
 )
 
 func (c *Config) applyEnv(lookup func(string) (string, bool)) error {
@@ -122,6 +151,15 @@ func (c *Config) applyEnv(lookup func(string) (string, bool)) error {
 	}
 	if v, ok := lookup(EnvAdminToken); ok {
 		c.AdminToken = v
+	}
+	if v, ok := lookup(EnvSTUNURLs); ok {
+		c.STUNURLs = splitList(v)
+	}
+	if v, ok := lookup(EnvTURNURLs); ok {
+		c.TURNURLs = splitList(v)
+	}
+	if v, ok := lookup(EnvTURNSecret); ok {
+		c.TURNSecret = v
 	}
 	if v, ok := lookup(EnvMapCenter); ok {
 		c.MapCenter = v
@@ -149,6 +187,7 @@ func (c *Config) applyEnv(lookup func(string) (string, bool)) error {
 		{EnvSweepMs, &c.SweepMs},
 		{EnvClientMsgsPerSec, &c.ClientMsgsPerSec},
 		{EnvClientMsgsBurst, &c.ClientMsgsBurst},
+		{EnvTURNCredentialTTLS, &c.TURNCredentialTTLS},
 	} {
 		v, ok := lookup(e.name)
 		if !ok {
@@ -185,10 +224,24 @@ func (c Config) validate() (Config, error) {
 		return c, fmt.Errorf("config: bootstrap_enroll_key must be at least %d characters", MinEnrollKeyLen)
 	case c.AdminToken != "" && len(c.AdminToken) < MinAdminTokenLen:
 		return c, fmt.Errorf("config: admin_token must be at least %d characters", MinAdminTokenLen)
+	case len(c.TURNURLs) > 0 && c.TURNSecret == "":
+		return c, fmt.Errorf("config: turn_urls needs turn_secret")
+	case c.TURNSecret != "" && len(c.TURNURLs) == 0:
+		return c, fmt.Errorf("config: turn_secret needs turn_urls")
+	case c.TURNSecret != "" && len(c.TURNSecret) < MinTURNSecretLen:
+		return c, fmt.Errorf("config: turn_secret must be at least %d characters", MinTURNSecretLen)
+	case c.TURNCredentialTTLS < MinTURNCredentialTTLS || c.TURNCredentialTTLS > MaxTURNCredentialTTLS:
+		return c, fmt.Errorf("config: turn_credential_ttl_s must be between %d and %d", MinTURNCredentialTTLS, MaxTURNCredentialTTLS)
 	case c.MapRadiusM < 0:
 		return c, fmt.Errorf("config: map_radius_m must be > 0")
 	case c.MapCenter == "" && (c.MapRadiusM != 0 || c.MapLock):
 		return c, fmt.Errorf("config: map_radius_m and map_lock need map_center")
+	}
+	if err := checkICEURLs("stun_urls", c.STUNURLs, "stun:", "stuns:"); err != nil {
+		return c, err
+	}
+	if err := checkICEURLs("turn_urls", c.TURNURLs, "turn:", "turns:"); err != nil {
+		return c, err
 	}
 	if c.MapCenter != "" {
 		lat, lon, err := parseLatLon(c.MapCenter)
@@ -201,6 +254,35 @@ func (c Config) validate() (Config, error) {
 		}
 	}
 	return c, nil
+}
+
+// splitList parses a comma-separated environment value, dropping blanks.
+func splitList(v string) []string {
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// checkICEURLs holds each url to one of the given schemes with something after
+// it. Clients pass these to WebRTC unchanged, and a browser throws on the whole
+// list when one entry is malformed, so a typo is caught here at startup.
+func checkICEURLs(key string, urls []string, schemes ...string) error {
+	for _, u := range urls {
+		ok := false
+		for _, scheme := range schemes {
+			if rest, has := strings.CutPrefix(u, scheme); has && rest != "" && !strings.HasPrefix(rest, "//") {
+				ok = true
+			}
+		}
+		if !ok || strings.ContainsAny(u, " \t,") {
+			return fmt.Errorf("config: %s: %q must look like %shost:port", key, u, schemes[0])
+		}
+	}
+	return nil
 }
 
 func parseLatLon(s string) (lat, lon float64, err error) {
@@ -230,6 +312,11 @@ func (c Config) Map() *MapView {
 		return nil
 	}
 	return &MapView{Lat: c.mapLat, Lon: c.mapLon, RadiusM: c.MapRadiusM, Lock: c.MapLock}
+}
+
+// TURNCredentialTTL is how long a minted TURN credential is accepted.
+func (c Config) TURNCredentialTTL() time.Duration {
+	return time.Duration(c.TURNCredentialTTLS) * time.Second
 }
 
 // Bootstrap reports whether declarative bootstrap is configured.
