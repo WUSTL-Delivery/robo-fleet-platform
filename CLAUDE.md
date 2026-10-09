@@ -13,7 +13,7 @@ integration, competitive landscape, server shape, deployment) so they don't get 
 plus the sibling-repo audit findings and the next work item (protocol v0).
 
 `docs/INTEGRATION.md` is the guide for building an app on the platform (wire protocol
-essentials, the four client roles, runnable TS service + Python robot examples, the
+essentials, the four client roles, runnable Go service + Python robot examples, the
 delivery-gdg migration map, deployment, and the honest list of v0 gaps).
 
 `docs/FLEETCTL.md` is the reference for `fleetctl`, the admin CLI (operator invites,
