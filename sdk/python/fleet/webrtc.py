@@ -12,6 +12,12 @@ twist on the channel still has to bear the current lease, and the peer is
 closed the moment the lease ends. The lease check, the deadman and the
 bus-shadow rule live in ``Robot``, in the one place both transports go through.
 
+The peer connection's ICE servers are the installation's, asked of the server
+(protocol/README.md, "ICE servers"): once when a lease is taken, so the answer
+is there by the time the offer comes, and kept for that lease until the TURN
+credential in it expires. A list given to ``Robot(ice_servers=...)`` replaces
+that: it is used as given and the server is never asked.
+
 Needs the ``webrtc`` extra (``pip install 'fleet-sdk[webrtc]'``), which brings
 in aiortc. Importing this module without it raises ImportError; importing
 ``fleet`` does not import this module.
@@ -26,9 +32,11 @@ machine's own interface addresses, so the machine needs at least one.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import math
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Optional, Union
@@ -46,6 +54,8 @@ from aiortc.sdp import candidate_from_sdp
 from .client import FleetClient, FleetClientError
 
 __all__ = [
+    "GATHER_TIMEOUT_S",
+    "ICE_EXPIRY_MARGIN_MS",
     "MAX_MESSAGE_BYTES",
     "MAX_SEQ",
     "TWIST_CHANNEL_LABEL",
@@ -64,6 +74,14 @@ TWIST_CHANNEL_LABEL = "twist"
 MAX_MESSAGE_BYTES = 1024
 #: Largest ``seq`` accepted (the largest integer JSON carries exactly).
 MAX_SEQ = 2**53 - 1
+#: A stored ICE answer is not used for a new peer this close to its expiry: the
+#: TURN server checks the credential when the relay is allocated, a moment after
+#: the peer connection is created.
+ICE_EXPIRY_MARGIN_MS = 10_000
+#: How long the answer waits for STUN and TURN servers that do not reply. The
+#: operator abandons an offer that has no live channel after 5 s, and aiortc
+#: answers only when gathering is over, so the wait must be well inside that.
+GATHER_TIMEOUT_S = 2.0
 
 #: One STUN/TURN server: ``{"urls": ..., "username": ..., "credential": ...}`` or an RTCIceServer.
 IceServer = Union[Mapping[str, Any], RTCIceServer]
@@ -147,6 +165,30 @@ def _ice_servers(servers: Optional[Sequence[IceServer]]) -> list[RTCIceServer]:
     return out
 
 
+def _bound_gathering(pc: RTCPeerConnection, seconds: float) -> None:
+    """Caps how long ``pc`` waits for ICE servers that do not reply. Call before setLocalDescription.
+
+    aiortc asks the STUN server from every interface address of the machine
+    and finishes gathering only when each has answered or five seconds have
+    passed. One interface that cannot reach the server (a VPN, a container
+    bridge) is enough to hold the answer back those five seconds, which is
+    the operator's whole connect timeout: the direct path would then never
+    come up on such a machine. Whatever was gathered by the deadline is used;
+    a server that answers later is simply not a candidate for this session.
+
+    The timeout is a parameter of aioice's gatherer that aiortc does not pass
+    on, so it is set on the connection underneath. If a later aiortc is laid
+    out differently this does nothing and the five seconds stand.
+    """
+    try:
+        connection = pc.sctp.transport.transport.iceGatherer._connection  # noqa: SLF001
+        gather = connection.get_component_candidates
+        if not isinstance(gather, functools.partial):
+            connection.get_component_candidates = functools.partial(gather, timeout=seconds)
+    except AttributeError as e:
+        log.debug("cannot bound ICE gathering on this aiortc: %s", e)
+
+
 def _candidate(init: Any) -> Optional[RTCIceCandidate]:
     """An ``RTCIceCandidateInit`` from a signal as aiortc's candidate; None if unusable."""
     if not isinstance(init, Mapping):
@@ -168,6 +210,24 @@ def _candidate(init: Any) -> Optional[RTCIceCandidate]:
     if cand.sdpMid is None and cand.sdpMLineIndex is None:
         cand.sdpMLineIndex = 0  # both may be null; the offer has one section, the data channel
     return cand
+
+
+@dataclass(eq=False)
+class _Pending:
+    """An offer taken but not yet answered with a peer: its ICE servers are still being asked for."""
+
+    id: str
+    #: The operator's candidates that arrive meanwhile; the session inherits them.
+    remote_ice: list[RTCIceCandidate] = field(default_factory=list)
+
+
+@dataclass(eq=False)
+class _LeaseIce:
+    """The server's ICE answer for one lease. ``got`` resolves to None when there was none."""
+
+    lease_id: str
+    #: ``(servers, expires_at_ms or None)``, or None.
+    got: "asyncio.Future[Optional[tuple[list[RTCIceServer], Optional[float]]]]"
 
 
 @dataclass(eq=False)
@@ -197,20 +257,35 @@ class TwistAnswerer:
         *,
         on_twist: Callable[[dict[str, Any]], bool],
         ice_servers: Optional[Sequence[IceServer]] = None,
+        now_ms: Optional[Callable[[], float]] = None,
     ) -> None:
         """
         Args:
-            client: the robot's control connection; signals are sent on it.
+            client: the robot's control connection; signals are sent on it,
+                and the ICE servers are asked for on it.
             on_twist: see the class docstring.
-            ice_servers: STUN/TURN servers. There is no default: with none
-                given, only host candidates are used and nothing leaves the
-                LAN (aiortc alone would fall back to a public STUN server).
+            ice_servers: None (the default) asks the server for the
+                installation's STUN/TURN servers when a lease is taken. A
+                list, the empty one included, is used as given for every peer
+                connection and the server is never asked. Either way the peer
+                connection is created with an explicit list, so nothing is
+                asked of a server nobody configured (aiortc alone would fall
+                back to a public STUN server).
+            now_ms: the clock ``expires_at_ms`` is compared with, in epoch
+                milliseconds. Default: the system clock.
         """
         self._client = client
         self._on_twist = on_twist
-        self._ice = _ice_servers(ice_servers)
+        self._static: Optional[list[RTCIceServer]] = _ice_servers(ice_servers) if ice_servers is not None else None
+        self._now_ms: Callable[[], float] = now_ms if now_ms is not None else (lambda: time.time() * 1000)
+        self._ice: Optional[_LeaseIce] = None
+        #: The ICE servers the newest peer connection was created with; None before the first.
+        self.peer_ice_servers: Optional[list[RTCIceServer]] = None
+        #: How many times the server has been asked for ICE servers.
+        self.ice_requests = 0
         self._lease: Optional[tuple[str, str]] = None  # (lease_id, operator_id)
         self._session: Optional[_Session] = None
+        self._pending: Optional[_Pending] = None
         self._signals = 0
         self._tasks: set[asyncio.Future[Any]] = set()
 
@@ -221,18 +296,28 @@ class TwistAnswerer:
         return s is not None and s.channel is not None and s.channel.readyState == "open"
 
     def grant(self, lease_id: str, operator_id: str) -> None:
-        """lease.granted: only this lease's operator may connect. A peer from an earlier lease is closed."""
+        """The robot holds this lease (lease.granted, or the welcome of a connection that states it).
+
+        Only its operator may connect. A peer from an earlier lease is closed.
+        For a lease that is new to the robot the ICE servers are asked for
+        now, ahead of the offer; a renewal asks for nothing.
+        """
         if self._lease is None or self._lease[0] != lease_id:
             self.close_peer()
+            self._ice = None
+            if self._static is None:
+                self._ask_ice(lease_id)
         self._lease = (lease_id, operator_id)
 
     def revoke(self) -> None:
         """The lease is over (released, stolen, expired, operator lost): close the peer."""
         self._lease = None
+        self._ice = None  # the answer belonged to the lease
         self.close_peer()
 
     def close_peer(self) -> None:
         """Closes the peer connection, if any, and keeps the lease: the operator may offer again."""
+        self._pending = None  # an offer still waiting for its ICE servers is abandoned
         s = self._session
         if s is None:
             return
@@ -249,7 +334,12 @@ class TwistAnswerer:
         """Forgets the lease, closes the peer and waits for it to be gone."""
         self.revoke()
         while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+            tasks = list(self._tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # Not left to the done callbacks: awaiting tasks that are already
+            # finished does not yield to the loop, so they would never run
+            # and this loop would spin.
+            self._tasks.difference_update(tasks)
 
     def on_signal(self, sig: Mapping[str, Any]) -> None:
         """A ``signal`` payload relayed by the server. Anything not from this lease's operator is ignored."""
@@ -264,27 +354,90 @@ class TwistAnswerer:
             sdp = d.get("sdp")
             if d.get("lease_id") != lease[0] or not isinstance(sdp, str):
                 return
-            self._offer(d["session"], lease[1], sdp)
+            self._offer(d["session"], lease, sdp)
             return
-        s = self._session
-        if kind != "ice" or s is None or s.id != d["session"]:
+        if kind != "ice":
+            return
+        s = self._session if self._session is not None and self._session.id == d["session"] else None
+        waiting = self._pending if self._pending is not None and self._pending.id == d["session"] else None
+        if s is None and waiting is None:
             return
         cand = _candidate(d.get("candidate"))
         if cand is None:
             return
-        if s.remote_set:
+        if s is not None and s.remote_set:
             self._spawn(self._add_ice(s, cand))
         else:
-            s.remote_ice.append(cand)
+            (s if s is not None else waiting).remote_ice.append(cand)  # type: ignore[union-attr]
 
     # ------------------------------------------------------------------ internals
 
-    def _offer(self, session_id: str, operator_id: str, sdp: str) -> None:
+    def _ask_ice(self, lease_id: str) -> _LeaseIce:
+        """Asks the server for this lease's ICE servers and keeps the answer while it is the lease's."""
+        self.ice_requests += 1
+        entry = _LeaseIce(lease_id=lease_id, got=asyncio.get_running_loop().create_future())
+
+        async def ask() -> None:
+            got: Optional[tuple[list[RTCIceServer], Optional[float]]] = None
+            try:
+                cfg = await self._client.ice_config()
+                expires = cfg.get("expires_at_ms")
+                got = (
+                    _ice_servers(cfg.get("ice_servers")),
+                    float(expires) if isinstance(expires, (int, float)) and not isinstance(expires, bool) else None,
+                )
+            except Exception as e:  # noqa: BLE001 - see below
+                # No answer in 2 s, a refusal, a dropped link, a server older
+                # than the message (invalid_message), or a list aiortc cannot
+                # use. None of them is a reason to refuse the offer; forget
+                # it, so the next offer asks again.
+                if self._ice is entry:
+                    self._ice = None
+                log.info("no ICE servers from the server (%s); using none", e)
+            entry.got.set_result(got)
+
+        self._ice = entry
+        self._spawn(ask())
+        return entry
+
+    async def _ice_for(self, lease_id: str) -> list[RTCIceServer]:
+        """The ICE servers for a peer connection made now under ``lease_id``. Never raises.
+
+        The fixed list if one was configured; else the lease's stored answer,
+        asked for again if there is none or its credential is at its expiry.
+        With nothing to go on it is the empty list, stated explicitly.
+        """
+        if self._static is not None:
+            return list(self._static)
+
+        def fresh(got: tuple[list[RTCIceServer], Optional[float]]) -> bool:
+            return got[1] is None or self._now_ms() < got[1] - ICE_EXPIRY_MARGIN_MS
+
+        entry = self._ice if self._ice is not None and self._ice.lease_id == lease_id else self._ask_ice(lease_id)
+        got = await entry.got
+        # Asked again at most once per offer: the operator is waiting for the answer.
+        if got is not None and not fresh(got) and self._lease is not None and self._lease[0] == lease_id:
+            got = await self._ask_ice(lease_id).got
+        return list(got[0]) if got is not None and fresh(got) else []
+
+    def _offer(self, session_id: str, lease: tuple[str, str], sdp: str) -> None:
         """A new offer replaces whatever peer was there: one peer per lease, the newest."""
         self.close_peer()
-        # Explicit, so nothing leaves the machine unless a server list was given.
-        pc = RTCPeerConnection(RTCConfiguration(iceServers=list(self._ice)))
-        s = _Session(id=session_id, operator_id=operator_id, pc=pc)
+        waiting = _Pending(id=session_id)
+        self._pending = waiting
+        self._spawn(self._begin(waiting, lease, sdp))
+
+    async def _begin(self, waiting: _Pending, lease: tuple[str, str], sdp: str) -> None:
+        servers = await self._ice_for(lease[0])
+        # A newer offer, a revocation or a steal while the ICE servers were asked for.
+        if self._pending is not waiting or self._lease is None or self._lease[0] != lease[0]:
+            return
+        self._pending = None
+        self.peer_ice_servers = servers
+        # Always explicit, the empty list included: nothing is asked of a
+        # server the installation did not configure.
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=list(servers)))
+        s = _Session(id=waiting.id, operator_id=lease[1], pc=pc, remote_ice=waiting.remote_ice)
         self._session = s
 
         def on_channel(channel: RTCDataChannel) -> None:
@@ -302,7 +455,7 @@ class TwistAnswerer:
 
         pc.on("datachannel", on_channel)
         pc.on("connectionstatechange", on_state)
-        self._spawn(self._answer(s, sdp))
+        await self._answer(s, sdp)
 
     async def _answer(self, s: _Session, sdp: str) -> None:
         pc = s.pc
@@ -313,6 +466,7 @@ class TwistAnswerer:
             for cand in held:
                 await self._add_ice(s, cand)
             # Gathers every candidate before returning; they all ride in the answer.
+            _bound_gathering(pc, GATHER_TIMEOUT_S)
             await pc.setLocalDescription(await pc.createAnswer())
             if self._session is not s:
                 return

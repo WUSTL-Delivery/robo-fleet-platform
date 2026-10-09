@@ -8,6 +8,8 @@ for ``/healthz`` before handing tests a :class:`FleetServer`.
 
 ``short_lease_server`` is a second server from the same binary whose leases
 expire after two seconds, for the tests that need a lease to run out.
+``ice_server`` is a third, configured with STUN/TURN servers (a local stub),
+for the tests of who is handed them.
 """
 
 from __future__ import annotations
@@ -20,11 +22,13 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 import pytest
+
+from stun_stub import StunStub
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SERVER_DIR = REPO_ROOT / "server"
@@ -43,6 +47,12 @@ class FleetServer:
     #: How long a lease lives without a renewal (the server's lease_ttl_ms).
     lease_ttl_ms: int = 15_000
     log_path: Path | None = None
+    #: What the server is configured to hand out (``ice_server`` only).
+    stun_urls: list[str] = field(default_factory=list)
+    turn_urls: list[str] = field(default_factory=list)
+    turn_secret: str = ""
+    #: The stub those URLs point at (``ice_server`` only).
+    stun_stub: Any = None
 
     def log(self) -> str:
         """Everything the server printed so far (useful in assertion messages)."""
@@ -84,8 +94,12 @@ def fleet_server_binary() -> Iterator[Path]:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _run_server(binary: Path, fleet: str, lease_ttl_ms: int) -> Iterator[FleetServer]:
-    """Starts the binary on a free loopback port with its own temp database."""
+def _run_server(binary: Path, fleet: str, lease_ttl_ms: int, **ice: Any) -> Iterator[FleetServer]:
+    """Starts the binary on a free loopback port with its own temp database.
+
+    ``ice`` sets the ICE fields of FleetServer, and with them the server's
+    FLEET_STUN_URLS / FLEET_TURN_URLS / FLEET_TURN_SECRET.
+    """
     tmp = Path(tempfile.mkdtemp(prefix="fleet-sdk-python-"))
     port = _free_port()
     log_path = tmp / "server.log"
@@ -99,6 +113,7 @@ def _run_server(binary: Path, fleet: str, lease_ttl_ms: int) -> Iterator[FleetSe
         heartbeat_interval_ms=200,
         lease_ttl_ms=lease_ttl_ms,
         log_path=log_path,
+        **ice,
     )
     env = {
         **os.environ,
@@ -111,6 +126,11 @@ def _run_server(binary: Path, fleet: str, lease_ttl_ms: int) -> Iterator[FleetSe
         "FLEET_BOOTSTRAP_ENROLL_KEY": server.enroll_key,
         "FLEET_ADMIN_TOKEN": server.admin_token,
     }
+    if server.stun_urls:
+        env["FLEET_STUN_URLS"] = ",".join(server.stun_urls)
+    if server.turn_urls:
+        env["FLEET_TURN_URLS"] = ",".join(server.turn_urls)
+        env["FLEET_TURN_SECRET"] = server.turn_secret
     with open(log_path, "wb") as log:
         proc = subprocess.Popen([str(binary)], cwd=tmp, env=env, stdout=log, stderr=subprocess.STDOUT)
     try:
@@ -137,3 +157,28 @@ def fleet_server(fleet_server_binary: Path) -> Iterator[FleetServer]:
 def short_lease_server(fleet_server_binary: Path) -> Iterator[FleetServer]:
     """A second real fleet-server whose leases expire two seconds after the last renewal."""
     yield from _run_server(fleet_server_binary, "sdk-python-short-lease", lease_ttl_ms=2_000)
+
+
+@pytest.fixture(scope="session")
+def ice_server(fleet_server_binary: Path) -> Iterator[FleetServer]:
+    """A real fleet-server configured with a TURN server, the stub in stun_stub.py.
+
+    No STUN server on purpose. aiortc asks a STUN server from every interface
+    address of the machine, and on a machine with an interface that cannot
+    reach the stub (a VPN) each offer would wait out the gathering timeout.
+    The TURN entry is the one that carries a credential, which is what these
+    tests are about; a STUN entry is exercised in test_webrtc.py.
+    """
+    secret = "sdk-python-turn-secret-0123456789"
+    stub = StunStub(secret)
+    try:
+        yield from _run_server(
+            fleet_server_binary,
+            "sdk-python-ice",
+            lease_ttl_ms=15_000,
+            turn_urls=[f"turn:{stub.host}:{stub.port}?transport=udp"],
+            turn_secret=secret,
+            stun_stub=stub,
+        )
+    finally:
+        stub.close()
