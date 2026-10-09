@@ -5,10 +5,13 @@
 // goes away for every console when anyone's claim is granted.
 import { canTeleop } from "./capabilities";
 import { displayName } from "./fleet/model";
+import { audienceOf, audienceSummary, type Audience } from "./fleet/presence";
 import { contextRows, formatWait, waitMs, type QueueEntry } from "./fleet/queue";
 
 interface Props {
   entries: QueueEntry[];
+  /** Who already has each waiting robot open, so two operators do not both go for the same one. */
+  audiences: ReadonlyMap<string, Audience>;
   synced: boolean;
   /** Estimated server time (see useServerNow); waits are measured against it. */
   serverNowMs: number;
@@ -17,7 +20,7 @@ interface Props {
   onClaim: (robotId: string) => void;
 }
 
-export function QueueList({ entries, synced, serverNowMs, selectedId, onSelect, onClaim }: Props) {
+export function QueueList({ entries, audiences, synced, serverNowMs, selectedId, onSelect, onClaim }: Props) {
   return (
     <section className="queue" aria-label="Help queue">
       <header>
@@ -32,6 +35,7 @@ export function QueueList({ entries, synced, serverNowMs, selectedId, onSelect, 
           const { robot, help } = entry;
           const waited = waitMs(entry, serverNowMs);
           const online = robot.presence === "online";
+          const people = audienceSummary(audienceOf(audiences, robot.robot_id));
           return (
             <li
               key={robot.robot_id}
@@ -47,6 +51,11 @@ export function QueueList({ entries, synced, serverNowMs, selectedId, onSelect, 
                 </span>
                 {help && <span className="reason">{help.reason}</span>}
                 {!online && <span className="offline">offline</span>}
+                {people && (
+                  <span className="people" data-testid="queue-people">
+                    {people}
+                  </span>
+                )}
               </button>
               {help?.context && (
                 <dl className="queue-context">

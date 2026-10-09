@@ -5,6 +5,7 @@
 import type { FleetClient, Manifest } from "@fleet-platform/sdk";
 import type { ReactNode } from "react";
 import type { RobotView } from "./fleet/model";
+import type { Operators } from "./fleet/presence";
 import { TeleopPanel } from "./teleop/TeleopPanel";
 
 export interface SectionProps {
@@ -12,6 +13,8 @@ export interface SectionProps {
   robot: RobotView;
   /** This console's operator id (welcome.client_id). */
   operatorId: string | undefined;
+  /** The fleet's operators, for sections that name one (the teleop driver). */
+  operators: Operators;
   /**
    * Set when the operator asked to claim this robot from outside the detail
    * pane (the help queue). A new number is a new request; see TeleopPanel.
@@ -41,6 +44,7 @@ const SECTIONS: CapabilitySection[] = [
           client={p.client}
           robot={p.robot}
           operatorId={p.operatorId}
+          operators={p.operators}
           claimSeq={p.claimSeq}
         />
       ) : null,

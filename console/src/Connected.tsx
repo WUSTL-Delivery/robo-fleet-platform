@@ -1,15 +1,19 @@
-// The signed-in console: help queue + fleet list | live map | detail pane.
-// Selection lives here so the queue, the list, the map and the detail pane
-// (and its teleop section) all agree on which robot the operator is looking at.
+// The signed-in console: presence bar over help queue + fleet list | live map |
+// detail pane. Selection lives here so the queue, the list, the map and the
+// detail pane (and its teleop section) all agree on which robot the operator is
+// looking at, and so the rest of the fleet can be told (useWatch).
 import { useCallback, useRef, useState } from "react";
 import type { FleetClient } from "@fleet-platform/sdk";
 import type { SessionView } from "./App";
 import { sortedRobots } from "./fleet/model";
+import { audienceOf, audiences, operatorViews } from "./fleet/presence";
 import { interventionQueue } from "./fleet/queue";
 import { useFleet } from "./fleet/useFleet";
 import { useServerNow } from "./fleet/useServerNow";
+import { useWatch } from "./fleet/useWatch";
 import { FleetList } from "./FleetList";
 import { FleetMap } from "./FleetMap";
+import { PresenceBar } from "./PresenceBar";
 import { QueueList } from "./QueueList";
 import { RobotPanel } from "./RobotPanel";
 
@@ -35,6 +39,10 @@ export function Connected({ client, session, onSignOut }: Props) {
   const robots = sortedRobots(fleet);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = selectedId ? fleet.robots.get(selectedId) : undefined;
+  // What the fleet is told this console has open: the robot in the detail pane.
+  useWatch(client, selected?.robot_id ?? null);
+  const selfId = welcome?.client_id;
+  const people = audiences(fleet, selfId);
 
   const queue = interventionQueue(fleet);
   const serverNowMs = useServerNow(client, queue.length > 0);
@@ -65,7 +73,7 @@ export function Connected({ client, session, onSignOut }: Props) {
             fleet <span className="mono">{welcome.fleet_id}</span>
           </span>
         )}
-        <div className="spacer" />
+        <PresenceBar operators={operatorViews(fleet, selfId)} selectedId={selectedId} onSelect={select} />
         <span className="status" data-state={state} aria-live="polite">
           <span className={`dot ${dot}`} />
           {LABEL[state]}
@@ -79,19 +87,22 @@ export function Connected({ client, session, onSignOut }: Props) {
         <div className="sidebar">
           <QueueList
             entries={queue}
+            audiences={people}
             synced={fleet.synced}
             serverNowMs={serverNowMs}
             selectedId={selectedId}
             onSelect={select}
             onClaim={claimFromQueue}
           />
-          <FleetList robots={robots} synced={fleet.synced} selectedId={selectedId} onSelect={select} />
+          <FleetList robots={robots} audiences={people} synced={fleet.synced} selectedId={selectedId} onSelect={select} />
         </div>
         <FleetMap robots={robots} selectedId={selectedId} onSelect={select} />
         <RobotPanel
           client={client}
-          operatorId={welcome?.client_id}
+          operatorId={selfId}
           robot={selected}
+          operators={fleet.operators}
+          audience={selected ? audienceOf(people, selected.robot_id) : audienceOf(people, "")}
           claimSeq={claim && claim.robotId === selectedId ? claim.seq : undefined}
           onClose={() => select(null)}
         />

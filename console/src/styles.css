@@ -258,3 +258,30 @@ kbd {
 .queue-context div { display: grid; grid-template-columns: max-content 1fr; column-gap: 8px; }
 .queue-context dt { color: var(--muted); }
 .queue-context dd { margin: 0; overflow-wrap: anywhere; }
+
+/* Presence bar: who is online, and the robot each is driving or watching. */
+.presence-bar { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; overflow-x: auto; }
+.presence-bar ul { display: flex; align-items: center; gap: 8px; list-style: none; margin: 0; padding: 3px; }
+.operator {
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; font-size: 13px;
+  padding: 3px 10px; border: 1px solid var(--border); border-radius: 999px;
+}
+.operator .dot { width: 7px; height: 7px; box-shadow: none; }
+.operator .you { color: var(--muted); }
+.operator[data-activity="driving"] { border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+.on-robot {
+  padding: 0; border: none; background: none; font: inherit; font-size: 12px; color: var(--muted); cursor: pointer;
+}
+.on-robot .robot { color: var(--text); text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: 3px; }
+.on-robot[data-verb="driving"] { color: var(--accent); }
+.on-robot:hover .robot, .on-robot[aria-pressed="true"] .robot { text-decoration-color: var(--accent); }
+.presence-bar .offline-count { font-size: 12px; color: var(--muted); white-space: nowrap; }
+
+/* Who is on a robot, in the list rows and queue entries. */
+.robot-row .people { color: var(--text); }
+.queue-open .people { grid-column: 1 / -1; font-size: 12px; color: var(--muted); }
+
+/* Spectating: read-only, with the one explicit way in. */
+.teleop-status.spectating strong { color: var(--accent); font-weight: 600; }
+.primary.steal { background: var(--warn); color: #1f1600; }
+.teleop-notice[data-notice="stolen"] { border-left-color: var(--danger); font-size: 13px; }
