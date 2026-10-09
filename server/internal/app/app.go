@@ -417,7 +417,18 @@ func (a *App) handleClaim(c *gateway.Conn, env protocol.Envelope, claim protocol
 		c.Send(errMsg(protocol.ErrNotFound, "robot not online", env.ID))
 		return
 	}
-	lease, stolen := a.ops.Claim(claim.RobotID, c.Client.ID)
+	// Whether the robot is free, and who wins two claims that cross, is decided
+	// inside ops under its lock. A refusal changes nothing and tells nobody but
+	// the caller. It names the lease in the way, which the caller could already
+	// read from its own fleet's snapshot, so a console can say who is driving.
+	lease, stolen, err := a.ops.Claim(claim.RobotID, c.Client.ID, claim.Steal)
+	if err != nil {
+		held := lease.Proto()
+		c.Send(protocol.Msg(protocol.TypeError, protocol.ErrorMsg{
+			Code: protocol.ErrConflict, Message: "robot is leased to another operator", Ref: env.ID, Lease: &held,
+		}))
+		return
+	}
 	granted := protocol.Msg(protocol.TypeLeaseGranted, lease.Proto())
 	c.Send(granted)
 	if rc := a.conn(claim.RobotID); rc != nil {

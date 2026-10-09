@@ -17,6 +17,9 @@ import (
 var (
 	ErrNotFound  = errors.New("ops: no such lease")
 	ErrNotHolder = errors.New("ops: caller does not hold this lease")
+	// ErrHeld refuses a claim that did not ask to steal: another operator holds
+	// the robot's lease.
+	ErrHeld = errors.New("ops: robot is leased to another operator")
 )
 
 type Lease struct {
@@ -127,14 +130,29 @@ func (o *Ops) RequestHelp(robotID, reason string, context map[string]any) *Help 
 }
 
 // Claim grants an exclusive lease, from HELP_REQUESTED or proactively from
-// AUTONOMOUS. Claiming a robot already in TELEOP is a steal: revoke + reissue,
-// never share — the revoked lease is returned so the old operator can be told.
-func (o *Ops) Claim(robotID, operatorID string) (Lease, *Revoked) {
+// AUTONOMOUS.
+//
+// A robot whose lease another operator holds is only taken with steal: revoke +
+// reissue, never share, and the revoked lease is returned so the old operator
+// can be told. Without steal the claim is refused with ErrHeld and nothing
+// changes; the Lease returned alongside ErrHeld is the one in the way. Two
+// plain claims racing for a free robot are decided here, under the lock: the
+// first is granted, the second sees the first's lease and is refused.
+//
+// A lease past its TTL still counts as held until SweepExpired revokes it;
+// expiry stays that one transition's job.
+//
+// An operator claiming a robot it already holds is not a steal and needs no
+// flag: its old lease is replaced by a new one (reported as revoked, stolen).
+func (o *Ops) Claim(robotID, operatorID string, steal bool) (Lease, *Revoked, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	r := o.get(robotID)
 	var stolen *Revoked
 	if r.lease != nil {
+		if r.lease.OperatorID != operatorID && !steal {
+			return *r.lease, nil, ErrHeld
+		}
 		stolen = &Revoked{Lease: *r.lease, Reason: protocol.RevokeStolen}
 	}
 	lease := Lease{
@@ -145,7 +163,7 @@ func (o *Ops) Claim(robotID, operatorID string) (Lease, *Revoked) {
 	}
 	r.lease = &lease
 	r.state = protocol.StateTeleop
-	return lease, stolen
+	return lease, stolen, nil
 }
 
 // Renew extends the holder's lease TTL.

@@ -1,6 +1,8 @@
 package ops
 
 import (
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,7 +33,7 @@ func TestHelpRequestTransitions(t *testing.T) {
 func TestClaimGrantsExclusiveLease(t *testing.T) {
 	o, now := newTestOps()
 	o.RequestHelp("r1", "stuck", nil)
-	lease, stolen := o.Claim("r1", "op1")
+	lease, stolen, _ := o.Claim("r1", "op1", false)
 	if stolen != nil {
 		t.Fatal("first claim should not steal")
 	}
@@ -43,7 +45,7 @@ func TestClaimGrantsExclusiveLease(t *testing.T) {
 	}
 
 	// Proactive claim from AUTONOMOUS is also legal.
-	l2, stolen2 := o.Claim("r2", "op1")
+	l2, stolen2, _ := o.Claim("r2", "op1", false)
 	if stolen2 != nil || l2.RobotID != "r2" {
 		t.Fatalf("proactive claim failed: %+v %+v", l2, stolen2)
 	}
@@ -51,9 +53,9 @@ func TestClaimGrantsExclusiveLease(t *testing.T) {
 
 func TestStealRevokesAndReissues(t *testing.T) {
 	o, _ := newTestOps()
-	first, _ := o.Claim("r1", "op1")
-	second, stolen := o.Claim("r1", "op2")
-	if stolen == nil || stolen.Lease.ID != first.ID || stolen.Reason != protocol.RevokeStolen {
+	first, _, _ := o.Claim("r1", "op1", false)
+	second, stolen, err := o.Claim("r1", "op2", true)
+	if err != nil || stolen == nil || stolen.Lease.ID != first.ID || stolen.Reason != protocol.RevokeStolen {
 		t.Fatalf("steal must revoke the old lease: %+v", stolen)
 	}
 	if second.ID == first.ID {
@@ -69,7 +71,7 @@ func TestStealRevokesAndReissues(t *testing.T) {
 
 func TestRenewExtendsOnlyForHolder(t *testing.T) {
 	o, now := newTestOps()
-	lease, _ := o.Claim("r1", "op1")
+	lease, _, _ := o.Claim("r1", "op1", false)
 	*now = now.Add(10 * time.Second)
 	renewed, err := o.Renew(lease.ID, "op1")
 	if err != nil {
@@ -86,7 +88,7 @@ func TestRenewExtendsOnlyForHolder(t *testing.T) {
 func TestReleaseReturnsToAutonomous(t *testing.T) {
 	o, _ := newTestOps()
 	o.RequestHelp("r1", "stuck", nil)
-	lease, _ := o.Claim("r1", "op1")
+	lease, _, _ := o.Claim("r1", "op1", false)
 	if _, err := o.Release(lease.ID, "op2"); err != ErrNotHolder {
 		t.Fatalf("non-holder release: err = %v", err)
 	}
@@ -101,7 +103,7 @@ func TestReleaseReturnsToAutonomous(t *testing.T) {
 
 func TestExpiryReturnsRobotToQueue(t *testing.T) {
 	o, now := newTestOps()
-	lease, _ := o.Claim("r1", "op1")
+	lease, _, _ := o.Claim("r1", "op1", false)
 	if expired := o.SweepExpired(); len(expired) != 0 {
 		t.Fatal("nothing should expire yet")
 	}
@@ -118,9 +120,9 @@ func TestExpiryReturnsRobotToQueue(t *testing.T) {
 
 func TestDropOperatorRevokesAllTheirLeases(t *testing.T) {
 	o, _ := newTestOps()
-	o.Claim("r1", "op1")
-	o.Claim("r2", "op1")
-	o.Claim("r3", "op2")
+	o.Claim("r1", "op1", false)
+	o.Claim("r2", "op1", false)
+	o.Claim("r3", "op2", false)
 	revoked := o.DropOperator("op1")
 	if len(revoked) != 2 {
 		t.Fatalf("expected 2 revocations, got %d", len(revoked))
@@ -140,7 +142,7 @@ func TestDropOperatorRevokesAllTheirLeases(t *testing.T) {
 
 func TestRobotForLease(t *testing.T) {
 	o, _ := newTestOps()
-	lease, _ := o.Claim("r1", "op1")
+	lease, _, _ := o.Claim("r1", "op1", false)
 	if robot, ok := o.RobotForLease(lease.ID, "op1"); !ok || robot != "r1" {
 		t.Fatalf("route = %s %v", robot, ok)
 	}
@@ -170,7 +172,7 @@ func TestHelpDetailsSurviveClaimAndExpiry(t *testing.T) {
 		t.Fatalf("queued entry = %+v", h)
 	}
 
-	o.Claim("r1", "op1")
+	o.Claim("r1", "op1", false)
 	if state, _, h := o.StateOf("r1"); state != protocol.StateTeleop || h != nil {
 		t.Fatalf("TELEOP should report no help entry, got %s %+v", state, h)
 	}
@@ -187,8 +189,8 @@ func TestHelpDetailsSurviveClaimAndExpiry(t *testing.T) {
 	}
 
 	// Operator loss keeps it too; a steal reports none (the robot stays in TELEOP).
-	o.Claim("r1", "op1")
-	if _, stolen := o.Claim("r1", "op2"); stolen == nil || stolen.Help != nil {
+	o.Claim("r1", "op1", false)
+	if _, stolen, _ := o.Claim("r1", "op2", true); stolen == nil || stolen.Help != nil {
 		t.Fatalf("steal should carry no help entry: %+v", stolen)
 	}
 	dropped := o.DropOperator("op2")
@@ -201,7 +203,7 @@ func TestHelpDetailsSurviveClaimAndExpiry(t *testing.T) {
 func TestHandbackClosesHelpEntry(t *testing.T) {
 	o, now := newTestOps()
 	o.RequestHelp("r1", "first", nil)
-	lease, _ := o.Claim("r1", "op1")
+	lease, _, _ := o.Claim("r1", "op1", false)
 	if _, err := o.Release(lease.ID, "op1"); err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +221,7 @@ func TestHandbackClosesHelpEntry(t *testing.T) {
 // queue with an entry: the revocation reason and the time it was requeued.
 func TestRequeueWithoutRequestOpensEntry(t *testing.T) {
 	o, now := newTestOps()
-	o.Claim("r1", "op1")
+	o.Claim("r1", "op1", false)
 	*now = now.Add(ttl + time.Second)
 	revoked := o.SweepExpired()
 	if len(revoked) != 1 || revoked[0].Help == nil {
@@ -234,3 +236,103 @@ func TestRequeueWithoutRequestOpensEntry(t *testing.T) {
 }
 
 func third(_ string, _ *Lease, h *Help) *Help { return h }
+
+// A plain claim never takes a robot from another operator: it is refused, the
+// refusal names the lease in the way, and nothing changes.
+func TestPlainClaimOnHeldLeaseIsRefused(t *testing.T) {
+	o, _ := newTestOps()
+	o.RequestHelp("r1", "stuck", nil)
+	first, _, _ := o.Claim("r1", "op1", false)
+
+	held, stolen, err := o.Claim("r1", "op2", false)
+	if !errors.Is(err, ErrHeld) || stolen != nil {
+		t.Fatalf("plain claim on a held lease: err=%v stolen=%+v, want ErrHeld and no revocation", err, stolen)
+	}
+	if held != first {
+		t.Fatalf("refusal reports %+v, want the holder's lease %+v", held, first)
+	}
+	if state, l, _ := o.StateOf("r1"); state != protocol.StateTeleop || l == nil || *l != first {
+		t.Fatalf("a refused claim must change nothing: state=%s lease=%+v", state, l)
+	}
+	if _, ok := o.RobotForLease(first.ID, "op1"); !ok {
+		t.Fatal("the holder must still hold its lease")
+	}
+
+	// Once the holder hands back, the same plain claim is granted.
+	if _, err := o.Release(first.ID, "op1"); err != nil {
+		t.Fatal(err)
+	}
+	if l, stolen, err := o.Claim("r1", "op2", false); err != nil || stolen != nil || l.OperatorID != "op2" {
+		t.Fatalf("claim after handback: lease=%+v stolen=%+v err=%v", l, stolen, err)
+	}
+}
+
+// Re-claiming a robot you already hold needs no steal flag.
+func TestReclaimingOwnLeaseNeedsNoSteal(t *testing.T) {
+	o, _ := newTestOps()
+	first, _, _ := o.Claim("r1", "op1", false)
+	second, replaced, err := o.Claim("r1", "op1", false)
+	if err != nil || second.OperatorID != "op1" || second.ID == first.ID {
+		t.Fatalf("re-claim: lease=%+v err=%v", second, err)
+	}
+	if replaced == nil || replaced.Lease.ID != first.ID {
+		t.Fatalf("re-claim should report the replaced lease: %+v", replaced)
+	}
+}
+
+// Many operators claim the same free robot at once, none asking to steal:
+// exactly one is granted, every other is refused with the winner's lease, and
+// no lease is ever revoked.
+func TestRacingPlainClaimsGrantExactlyOne(t *testing.T) {
+	const racers = 32
+	for round := 0; round < 50; round++ {
+		o, _ := newTestOps()
+		o.RequestHelp("r1", "stuck", nil)
+
+		type result struct {
+			lease  Lease
+			stolen *Revoked
+			err    error
+		}
+		results := make([]result, racers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := 0; i < racers; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				l, s, err := o.Claim("r1", "op"+string(rune('A'+i)), false)
+				results[i] = result{l, s, err}
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		var winner *Lease
+		for i := range results {
+			if results[i].stolen != nil {
+				t.Fatalf("round %d: a plain claim revoked a lease: %+v", round, results[i].stolen)
+			}
+			if results[i].err == nil {
+				if winner != nil {
+					t.Fatalf("round %d: two claims granted: %+v and %+v", round, *winner, results[i].lease)
+				}
+				winner = &results[i].lease
+			} else if !errors.Is(results[i].err, ErrHeld) {
+				t.Fatalf("round %d: err = %v, want ErrHeld", round, results[i].err)
+			}
+		}
+		if winner == nil {
+			t.Fatalf("round %d: no claim was granted", round)
+		}
+		for i := range results {
+			if results[i].err != nil && results[i].lease != *winner {
+				t.Fatalf("round %d: refusal names %+v, want the winner %+v", round, results[i].lease, *winner)
+			}
+		}
+		if _, l, _ := o.StateOf("r1"); l == nil || *l != *winner {
+			t.Fatalf("round %d: table holds %+v, want %+v", round, l, *winner)
+		}
+	}
+}

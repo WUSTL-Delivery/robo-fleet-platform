@@ -76,8 +76,11 @@ class RawOperator:
 
         return await asyncio.wait_for(loop(), timeout)
 
-    async def claim(self, robot_id: str) -> str:
-        await self.ws.send(_env("lease.claim", {"robot_id": robot_id}))
+    async def claim(self, robot_id: str, steal: bool = False) -> str:
+        payload: dict[str, Any] = {"robot_id": robot_id}
+        if steal:
+            payload["steal"] = True
+        await self.ws.send(_env("lease.claim", payload))
         return (await self.expect("lease.granted"))["lease_id"]
 
     async def twist(self, lease_id: str, x: float, wz: float = 0.0) -> None:
@@ -170,7 +173,7 @@ async def test_twist_under_lease_reaches_handler_and_stale_lease_does_not(fleet_
 
     # Bob steals the robot; alice's lease1 is now stale.
     bob = await start_operator(fleet_server, teardown, "bob")
-    lease2 = await bob.claim(robot.robot_id)
+    lease2 = await bob.claim(robot.robot_id, steal=True)
     await wait_until(lambda: robot.lease_id == lease2)
     assert lease2 != lease1
     # The steal stops the robot at once: alice's setpoint must not carry over.
