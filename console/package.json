@@ -13,7 +13,8 @@
     "build": "tsc -p tsconfig.json --noEmit && vite build",
     "embed": "npm run build && node scripts/embed.mjs",
     "preview": "vite preview",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@fleet-platform/sdk": "file:../sdk/typescript",
@@ -26,6 +27,7 @@
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.1.1",
     "typescript": "^7.0.2",
-    "vite": "^8.3.1"
+    "vite": "^8.3.1",
+    "vitest": "^4.1.11"
   }
 }

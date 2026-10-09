@@ -1,6 +1,7 @@
 // Teleop section of the robot detail pane: take over, drive with WASD, hand
 // back. Rendered only for robots whose manifest declares a twist drive, keyed
 // by robot id (see useTeleop).
+import { useEffect, useRef } from "react";
 import type { FleetClient } from "@fleet-platform/sdk";
 import type { RobotView } from "../fleet/model";
 import { useTeleop, type DriveKey } from "./useTeleop";
@@ -9,6 +10,11 @@ interface Props {
   client: FleetClient;
   robot: RobotView;
   operatorId: string | undefined;
+  /**
+   * A claim asked for elsewhere (the help queue's Claim button). Each new
+   * number takes over once, exactly as the Take over button would.
+   */
+  claimSeq?: number;
 }
 
 const PAD: { key: DriveKey; label: string; area: string }[] = [
@@ -18,8 +24,15 @@ const PAD: { key: DriveKey; label: string; area: string }[] = [
   { key: "right", label: "D", area: "d" },
 ];
 
-export function TeleopPanel({ client, robot, operatorId }: Props) {
+export function TeleopPanel({ client, robot, operatorId, claimSeq }: Props) {
   const t = useTeleop(client, robot, operatorId);
+  const { takeOver } = t;
+  const claimHandled = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (claimSeq === undefined || claimHandled.current === claimSeq) return;
+    claimHandled.current = claimSeq;
+    takeOver();
+  }, [claimSeq, takeOver]);
   const drive = robot.manifest?.drive;
   const online = robot.presence === "online";
   const otherDriver = robot.lease && robot.lease.operator_id !== operatorId ? robot.lease.operator_id : undefined;

@@ -207,9 +207,9 @@ jobs:
         working-directory: sdk/typescript
         run: npm ci && npm run build
 
-      - name: build console
+      - name: test and build console
         working-directory: console
-        run: npm ci && npm run build
+        run: npm ci && npm test && npm run build
 
   image:
     name: Build and publish image
