@@ -31,7 +31,7 @@ Contents
 1. [Run the server locally](#1-run-the-server-locally)
 2. [Wire protocol essentials](#2-wire-protocol-essentials)
 3. [The four integration roles](#3-the-four-integration-roles)
-4. [Worked example: a service in TypeScript](#4-worked-example-a-service-in-typescript)
+4. [Worked example: a service in Go](#4-worked-example-a-service-in-go)
 5. [Worked example: a robot in Python](#5-worked-example-a-robot-in-python)
 6. [Migration map for delivery-gdg-platform](#6-migration-map-for-delivery-gdg-platform)
 7. [Deploying next to the club stack](#7-deploying-next-to-the-club-stack)
@@ -385,114 +385,106 @@ Until `fleet_agent` exists, the robot side is the Python SDK used directly, as i
 
 ---
 
-## 4. Worked example: a service in TypeScript
+## 4. Worked example: a service in Go
 
-A minimal command brain against the current server, no dependencies (Node 22 has a global
-`WebSocket`). It enrolls if it has no token, connects, subscribes, and dispatches an
-assignment to every robot that comes online. This is the shape the future
-`sdk/typescript` will wrap; the SDK will not change any message on the wire.
+A Go service uses the Go SDK in `sdk/go`, package `fleet`. It owns the socket, enrollment,
+the token file, heartbeat, reconnect with backoff, and subscribing again after every
+reconnect. Your code owns the world model and every decision made from it.
 
-```ts
-// brain.ts — run with: node --experimental-strip-types brain.ts
-// env: FLEET_URL=ws://localhost:8080/ws  FLEET_ENROLL_KEY=fp-ek-...  (first run)
-//      FLEET_TOKEN=fp-tk-...                                         (after that)
-type Envelope = { v: 0; type: string; id?: string; ts_ms?: number; payload: any };
-
-const url = process.env.FLEET_URL ?? "ws://localhost:8080/ws";
-
-function envelope(type: string, payload: unknown, id?: string): string {
-  return JSON.stringify({ v: 0, type, id, ts_ms: Date.now(), payload } satisfies Envelope);
-}
-
-// One-shot: enrollment key → token. The server closes the socket after replying.
-async function enroll(key: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
-    ws.onopen = () => ws.send(envelope("enroll.request", { enrollment_key: key, kind: "service", name: "brain" }));
-    ws.onmessage = (m) => {
-      const env: Envelope = JSON.parse(String(m.data));
-      if (env.type === "enroll.response") resolve(env.payload.token);
-      else reject(new Error(`enroll failed: ${JSON.stringify(env.payload)}`));
-    };
-    ws.onerror = reject;
-  });
-}
-
-async function main() {
-  const token = process.env.FLEET_TOKEN ?? (await enroll(process.env.FLEET_ENROLL_KEY!));
-  console.log("token (store this):", token);
-
-  const ws = new WebSocket(url);
-  let heartbeat: ReturnType<typeof setInterval> | undefined;
-  const online = new Map<string, unknown>(); // robot_id → manifest (the world model, tiny)
-
-  ws.onopen = () => ws.send(envelope("hello", { token, agent: { name: "brain", version: "0.0.1" } }));
-
-  ws.onmessage = (m) => {
-    const env: Envelope = JSON.parse(String(m.data));
-    switch (env.type) {
-      case "welcome":
-        heartbeat = setInterval(() => ws.send(envelope("heartbeat", {})), env.payload.heartbeat_interval_ms);
-        ws.send(envelope("subscribe", { topics: ["presence", "events", "telemetry", "channel:edge_report"] }));
-        break;
-
-      case "snapshot": // rebuild the world model; then events keep it current
-        console.log("snapshot:", env.payload.robots.map((r: any) => `${r.robot_id}:${r.presence}/${r.state}`));
-        for (const r of env.payload.robots) {
-          if (r.presence !== "online") continue;
-          online.set(r.robot_id, r.manifest);
-          if (r.state === "AUTONOMOUS") dispatch(r.robot_id); // robots that were already up when we (re)started
-        }
-        break;
-
-      case "event":
-        switch (env.payload.event) {
-          case "robot.online":
-            online.set(env.payload.robot_id, null);
-            dispatch(env.payload.robot_id);
-            break;
-          case "robot.offline":
-            online.delete(env.payload.robot_id);
-            break;
-          case "robot.help_requested":
-          case "robot.lease_granted":
-          case "robot.lease_released":
-          case "robot.lease_revoked":
-            console.log("ops:", env.payload.event, env.payload.robot_id, env.payload.data);
-            break;
-          case "robot.telemetry":
-            // env.payload.data.pose is frame-relative: check pose.frame before reading lat/lon
-            break;
-        }
-        break;
-
-      case "channel.message": // e.g. edge_report broadcasts, or an assignment ack
-        console.log("channel", env.payload.channel, "from", env.payload.from, env.payload.data);
-        break;
-
-      case "error":
-        console.error("server error:", env.payload);
-        break;
-    }
-  };
-
-  ws.onclose = () => { clearInterval(heartbeat); /* reconnect with backoff, same token */ };
-
-  // Domain payload; the platform never looks inside `data`. Use `id` so a failure
-  // (robot went offline between event and publish) comes back with `ref`.
-  function dispatch(robotId: string) {
-    const assignment = { seq: Date.now(), order_id: 17, waypoints: ["n3", "n7", "n9"], deadline_ms: Date.now() + 600_000 };
-    ws.send(envelope("channel.publish", { channel: "assignment", to: robotId, data: assignment }, `assign-${robotId}`));
-  }
-}
-
-main();
+```go
+import "fleetplatform/sdk/go/fleet" // placeholder module path, see below
 ```
 
-What is deliberately missing, because it belongs in your code: retrying an assignment until
-the robot acks it on the channel, and the delivery state machine. What is deliberately
-missing because the SDK will provide it: reconnect with backoff, a typed event emitter, a
-request/ack helper for channels.
+`fleetplatform/sdk/go` is a **placeholder** module path until the project is named (§8).
+It does not resolve on the Go proxy, so a service consumes the SDK from a checkout with a
+`replace` in its own `go.mod`, the same way `server/go.mod` does:
+
+```
+require fleetplatform/sdk/go v0.0.0
+replace fleetplatform/sdk/go => ../fleet-platform/sdk/go
+```
+
+The generic, runnable version (no delivery vocabulary: a `job` on a `jobs` channel) is
+[`sdk/go/examples/dispatcher`](../sdk/go/examples/dispatcher/main.go), under 100 lines,
+and [`sdk/go/README.md`](../sdk/go/README.md) has the short form. §9 runs it against a
+local server and the Python example robot. Here is the same shape as the club's command
+brain would use it:
+
+```go
+// brain.go: env FLEET_URL, FLEET_ENROLL_KEY (first run only)
+ctx := context.Background()
+client, err := fleet.Connect(ctx, fleet.Config{
+	URL:       os.Getenv("FLEET_URL"), // wss://fleet.<domain>/ws
+	Kind:      fleet.Service,
+	Name:      "command-brain",
+	EnrollKey: os.Getenv("FLEET_ENROLL_KEY"), // used once
+	TokenFile: "/var/lib/brain/token.json",   // same service id across restarts
+})
+if err != nil {
+	log.Fatal(err) // terminal: a bad key or a revoked token. An unreachable server is retried
+}
+
+// 1. World model. Every snapshot replaces it: the answer to Subscribe, and a fresh
+//    one after each reconnect. Events keep it current in between.
+client.OnSnapshot(world.Reset)     // every robot: presence, state, manifest, lease
+client.OnPresence(world.SetOnline) // robot.online / robot.offline
+client.OnLease(func(ch fleet.LeaseChange) { world.SetState(ch.RobotID, ch.State) })
+client.OnHelp(func(id string, _ fleet.HelpDetails) { world.SetState(id, protocol.StateHelpRequested) })
+client.OnTelemetry(world.SetTelemetry) // t.Pose is frame-relative: check Pose.Frame before lat/lon
+if _, err := client.Subscribe(ctx, fleet.TopicPresence, fleet.TopicEvents, fleet.TopicTelemetry); err != nil {
+	log.Fatal(err)
+}
+
+// 2. Domain channels. The platform never looks inside the data.
+assignment := client.Channel("assignment")
+client.Channel("delivery_status").OnMessage(world.ApplyStatus) // func(from string, data json.RawMessage)
+
+// 3. Dispatch. Club policy picks; the SDK delivers.
+dispatch := func(o Order) {
+	// Pure club code over the world model: online, AUTONOMOUS, idle, enough battery.
+	robotID, ok := world.Pick(o)
+	if !ok {
+		queue.Requeue(o)
+		return
+	}
+	job := Assignment{OrderID: o.ID, Waypoints: route(o)}
+	// channel.publish is at-most-once. SendAcked re-sends the job until the robot's
+	// on_acked handler (§5) accepts it, the server says the robot is gone, or 10 s pass.
+	if err := assignment.SendAcked(ctx, robotID, job, 10*time.Second); err != nil {
+		queue.Requeue(o) // fleet.ErrNotFound: not connected. fleet.ErrTimeout: unknown
+		return
+	}
+	world.MarkAssigned(robotID, o.ID) // only after the ack
+}
+```
+
+`world`, `queue`, `route`, `Order` and `Assignment` stand in for club code; `protocol` is
+`fleetplatform/sdk/go/protocol`, the wire types. The rules the example follows:
+
+- **Dispatch only to a robot that is online and `AUTONOMOUS`.** A robot in `TELEOP` has an
+  operator driving it and one in `HELP_REQUESTED` is waiting for one. `LeaseChange.State`
+  is the state a lease event leaves the robot in (`TELEOP` after a grant, `AUTONOMOUS`
+  after a release, `HELP_REQUESTED` after a revocation that put it back in the queue),
+  and it is `""` for a revocation the SDK cannot place: treat anything that is not
+  `AUTONOMOUS` as not dispatchable.
+- **Replace the model from every snapshot.** Events that happened while the service was
+  disconnected are not replayed; their effect is in the snapshot that follows the
+  reconnect. The SDK holds events back until that snapshot has been delivered, so an
+  event is never applied to a model the snapshot is about to replace.
+- **Register callbacks before `Subscribe`**, and do no long work inside one: they run one
+  at a time, in wire order. `SendAcked` blocks until the outcome is known, so call it
+  from a goroutine of your own.
+- **A failed `SendAcked` is not always "not delivered".** `fleet.ErrNotFound` on the first
+  copy means it was not; a timeout, or `ErrNotFound` on a re-send, means unknown (the
+  job may have arrived and its ack been lost). Requeueing is then a second send of the
+  same job, so put an identity in the data (`order_id` here) and make the robot side
+  idempotent on it. The convention is in
+  [`protocol/README.md`](../protocol/README.md#acked-send-convention-on-channel-data).
+
+What is deliberately missing, because it belongs in your code: the delivery state machine,
+which robot is busy with what, and how long to keep retrying an assignment. A service in
+TypeScript uses `sdk/typescript` (the console and the sim are built on it); it has
+channels and the same snapshot-then-events model, but no acked-send helper yet.
 
 ---
 
@@ -529,15 +521,23 @@ robot = Robot(
 assignment = robot.channel("assignment")
 edge_report = robot.channel("edge_report")
 
-async def on_assignment(sender, data):
-    # club node: ack, then run Nav2 legs. Idempotent on data["seq"].
-    await assignment.publish({"ack": data["seq"]}, to=sender)
-    # ... per completed leg:
-    await edge_report.publish({"edge_id": "e12", "seconds": 41.5})   # broadcast
-    # ... when a leg fails past the club's escalation policy:
-    await robot.request_help("nav_goal_failed", {"attempts": 3})
+legs = asyncio.Queue()
 
-assignment.on_message(on_assignment)
+def on_assignment(sender, data):
+    # Acked receive, the other end of the brain's SendAcked (§4). Called once per
+    # assignment however often the brain re-sends it; returning accepts it, and the SDK
+    # replies {"ack": seq} to the sender. Accepted is not finished: hand it off and return.
+    legs.put_nowait(data)   # idempotent on data["order_id"]: a requeued order is a new send
+
+assignment.on_acked(on_assignment)
+
+async def run_legs():       # club node: Nav2, leg by leg
+    while True:
+        job = await legs.get()
+        # ... per completed leg:
+        await edge_report.publish({"edge_id": "e12", "seconds": 41.5})   # broadcast
+        # ... when a leg fails past the club's escalation policy:
+        await robot.request_help("nav_goal_failed", {"attempts": 3})
 # Lease-gated, fail-closed twist: operator setpoints, plus zero-velocity stops from the
 # deadman (300 ms without a valid twist), a revoke, or a lost link.
 robot.on_twist(lambda cmd: cmd_vel.publish(cmd.linear_x, cmd.angular_z))
@@ -552,6 +552,7 @@ async def main():
                                   velocity={"v_mps": 0.0, "w_radps": 0.0}, health={"gps_fix": "rtk_fixed"})
             await asyncio.sleep(1)
     asyncio.create_task(telemetry())
+    asyncio.create_task(run_legs())
     await robot.run_forever()   # heartbeats; reconnects with backoff, same token
 
 asyncio.run(main())
@@ -666,15 +667,15 @@ Read this before designing against the server. Each item is a known gap, not a h
 
 | Gap | Consequence for you | Where it lands |
 |---|---|---|
-| **SDKs are source-only, and there is no ROS 2 node yet.** `sdk/typescript` and `sdk/python` exist (§5), but neither is published to npm or PyPI, and `fleet_agent` (`sdk/ros2`) is not written | install from a checkout (`pip install -e sdk/python`); a ROS robot wires the Python SDK's `on_twist` / `on_lease` / `telemetry` to its topics by hand until `fleet_agent` does it | package publishing with the project rename; `fleet_agent` in the real-hardware phase |
+| **SDKs are source-only, and the ROS 2 node is partial.** `sdk/typescript`, `sdk/python` and `sdk/go` exist (§4, §5), but none is published (npm, PyPI, a resolvable Go module path). `fleet_agent` (`sdk/ros2`) does connection, manifest and telemetry; it does not forward operator twist to `cmd_vel` or bridge channels to topics yet | install from a checkout (`pip install -e sdk/python`; a `replace` directive for Go, §4); a ROS robot that must be driven wires the Python SDK's `on_twist` / `on_lease` to its topics by hand until `fleet_agent` does it | package publishing with the project rename; the `fleet_agent` twist bridge in the real-hardware phase |
 | **Operator access is invite-only, from the CLI.** Operators redeem a single-use, expiring invite minted by `fleetctl invite operator` (D14), which needs the server's `FLEET_ADMIN_TOKEN`. There are no passwords, no roles, and no way to mint an invite from the console | whoever holds the admin token onboards every operator; an operator's token lives in their browser, and losing it means a new invite (revoke the lost one with `fleetctl client revoke`) | console-side invites through the same admin API, later |
 | **The console is basic.** It shows robots live on a map, renders what each manifest declares, and does take over / WASD / hand back. It does not render declared map layers yet, and a plain `go build` does not include it (`npm run embed` in `console/`, or the Docker image) | a service's layers have nowhere to show yet; build the image or embed the console before pointing an operator at `/` | layer rendering with the layer-streams work |
 | **Layer retention is in memory only** | the server replays each layer's latest declare and update to late `layers` subscribers, but a server restart forgets them, and a service's layers are dropped 5 minutes after it disconnects, so re-declare and re-send on every (re)connect | persisting layers in the store, if a deployment needs it |
 | **Rate limits are per connection and per type, not per subscriber** | a chatty `telemetry` or `channel.publish` loop is throttled (§2.8), not disconnected; a slow *reader* still overflows its 64-deep send queue and is dropped | per-subscriber fan-out limits, later |
-| **Twist rides the bus as a fallback**; no WebRTC media, no TURN | fine for sim and for testing the club node's lease handling; not for driving a real robot | roadmap step 3 |
+| **The direct teleop path is twist only, console to sim only.** Twist rides a WebRTC data channel between the console and a sim robot, with the bus as the fallback. The Python SDK and `fleet_agent` do not answer the offer, so those robots are driven over the bus. No video, and no STUN or TURN server is configured | the direct path connects on loopback or one LAN, not across NATs; fine for sim and for testing the club node's lease handling; not for driving a real robot | roadmap step 3 |
 | **No replay / black-box recording** | | later milestone |
-| **Snapshot lists robots only** | you cannot discover other services or operators from a snapshot | if a real need appears |
-| **Placeholders**: Go module path `fleetplatform/server`, schema `$id` host `fleetplatform.local` | do not hard-code either in club code | project rename |
+| **Snapshot lists robots and operators, not services** | you cannot discover other services from a snapshot | if a real need appears |
+| **Placeholders**: Go module paths `fleetplatform/server` and `fleetplatform/sdk/go`, schema `$id` host `fleetplatform.local` | a Go service's SDK imports change with the rename (one search-and-replace of the `fleetplatform` prefix); do not hard-code the schema host in club code | project rename |
 
 ---
 
@@ -692,10 +693,13 @@ Read this before designing against the server. Each item is a known gap, not a h
   client and that test disagree about a message, the test is right.
 - **Run it yourself.** `cd server && go test ./...` takes a few seconds and needs nothing
   installed beyond Go.
-- **Local two-terminal check.** Start the server (§1), run §5's robot in one terminal and
-  §4's brain in another. You should see the brain's snapshot list the robot online, then a
-  `channel.message` ack come back after it dispatches. Kill the robot and the brain sees
-  `robot.offline` within about 2.5 heartbeat intervals.
+- **Local two-terminal check.** Start the server (§1). Run the Python example robot in one
+  terminal (`sdk/python/examples/fake_robot.py`, see `sdk/python/README.md`) and the Go
+  dispatcher of §4 in another (`cd sdk/go && FLEET_ENROLL_KEY=... go run ./examples/dispatcher`).
+  The dispatcher prints `snapshot: 1 robots`, then `acked job-1 by r_...` every two
+  seconds, and the robot prints each job once. Kill the robot and the dispatcher prints
+  `requeue job-N ...` until the robot is back, then sends what queued up. A robot whose
+  process hangs instead of exiting is noticed after about 2.5 heartbeat intervals.
 
 The broader verification plan, including the planned SDK-level suites that launch the
 built binary, is `docs/TESTING.md`.

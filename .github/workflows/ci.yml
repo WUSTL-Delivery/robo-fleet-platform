@@ -57,7 +57,7 @@ jobs:
 
   # sdk/go is its own Go module (the wire types in sdk/go/protocol, imported by the
   # server through a replace), so `./...` in server/ does not reach it. The schema
-  # contract test lives here.
+  # contract test (sdk/go/protocol) and the client tests (sdk/go/fleet) run here.
   sdk-go:
     name: Go SDK
     runs-on: ubuntu-latest
@@ -68,11 +68,14 @@ jobs:
       - uses: actions/checkout@v4
 
       # Runs on the server's toolchain; sdk/go/go.mod declares the oldest Go the
-      # SDK supports, which is not what CI should build with.
+      # SDK supports, which is not what CI should build with. The client tests
+      # build and run a real fleet-server, so the cache covers its modules too.
       - uses: actions/setup-go@v5
         with:
           go-version-file: server/go.mod
-          cache-dependency-path: sdk/go/go.sum
+          cache-dependency-path: |
+            server/go.sum
+            sdk/go/go.sum
 
       - name: gofmt
         run: |
@@ -86,8 +89,19 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # One client test sends acked jobs to sdk/python/examples/fake_robot.py. It
+      # skips unless FLEET_TEST_PYTHON can import the Python SDK's dependencies.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: install the Python SDK for the interop test
+        run: python -m pip install ../python
+
       - name: go test
-        run: go test ./...
+        run: go test -race ./...
+        env:
+          FLEET_TEST_PYTHON: python
 
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
