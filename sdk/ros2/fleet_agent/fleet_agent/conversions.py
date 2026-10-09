@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from fleet import geo_pose
 
-__all__ = ["battery_from_state", "build_manifest", "pose_from_fix"]
+__all__ = ["battery_from_state", "build_manifest", "clamp_twist", "pose_from_fix"]
 
 #: ``sensor_msgs/NavSatStatus.STATUS_NO_FIX``.
 _STATUS_NO_FIX = -1
@@ -53,6 +53,28 @@ def build_manifest(
     if battery:
         manifest["battery"] = {}
     return manifest
+
+
+def clamp_twist(
+    x_mps: float, y_mps: float, w_radps: float, *, max_v_mps: float, max_w_radps: float
+) -> tuple[float, float, float]:
+    """An operator setpoint limited to the manifest's drive limits: (x, y, angular z).
+
+    The planar linear velocity is scaled down as a vector when its magnitude
+    exceeds ``max_v_mps``, so the direction of travel is kept; the yaw rate is
+    clamped to ``max_w_radps`` either way. A setpoint with any non-finite
+    component is not a setpoint: it becomes a stop.
+    """
+    x, y, w = float(x_mps), float(y_mps), float(w_radps)
+    if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(w)):
+        return 0.0, 0.0, 0.0
+    speed = math.hypot(x, y)
+    if speed > max_v_mps:
+        scale = max_v_mps / speed
+        x, y = x * scale, y * scale
+    w = min(max_w_radps, max(-max_w_radps, w))
+    # "+ 0.0" turns -0.0 into 0.0, so a stop compares equal to (0.0, 0.0, 0.0).
+    return x + 0.0, y + 0.0, w + 0.0
 
 
 def pose_from_fix(fix: Any) -> Optional[dict[str, Any]]:
