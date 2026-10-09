@@ -5,6 +5,7 @@ import { useEffect, useRef } from "react";
 import type { FleetClient } from "@fleet-platform/sdk";
 import type { RobotView } from "../fleet/model";
 import { useTeleop, type DriveKey } from "./useTeleop";
+import type { TwistLinkStatus } from "./twistTransport";
 
 interface Props {
   client: FleetClient;
@@ -23,6 +24,14 @@ const PAD: { key: DriveKey; label: string; area: string }[] = [
   { key: "back", label: "S", area: "s" },
   { key: "right", label: "D", area: "d" },
 ];
+
+/** Which wire twist is on, in words. The direct link is the fast path; the server relay is the fallback. */
+function linkLabel(link: TwistLinkStatus): string {
+  if (link.active === "p2p") return `Direct (WebRTC)${link.rttMs === undefined ? "" : `, ${Math.round(link.rttMs)} ms`}`;
+  if (link.direct === "connecting") return "Server relay, connecting direct link...";
+  if (link.direct === "retrying") return "Server relay, direct link down (retrying)";
+  return "Server relay";
+}
 
 export function TeleopPanel({ client, robot, operatorId, claimSeq }: Props) {
   const t = useTeleop(client, robot, operatorId);
@@ -57,6 +66,10 @@ export function TeleopPanel({ client, robot, operatorId, claimSeq }: Props) {
             <dt>Command</dt>
             <dd className="mono" data-testid="teleop-command">
               v {t.command.vx.toFixed(2)} m/s, ω {t.command.wz.toFixed(2)} rad/s
+            </dd>
+            <dt>Link</dt>
+            <dd data-testid="teleop-link" data-transport={t.link.active} data-direct={t.link.direct}>
+              {linkLabel(t.link)}
             </dd>
           </dl>
           <label htmlFor="teleop-speed">
