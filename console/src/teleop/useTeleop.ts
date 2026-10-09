@@ -171,6 +171,9 @@ export function useTeleop(client: FleetClient, robot: RobotView, operatorId: str
             leaseId: l.lease_id,
             sendBus: (payload) => trySend("twist", payload, { id: nextId("twist") }),
             onStatus: setLink,
+            // Asked before every offer: the TURN credential is short-lived. It
+            // never rejects; with no answer the peer gets no servers.
+            iceServers: () => client.iceServers(),
           })
         : undefined;
       setLink(linkRef.current?.status ?? BUS_ONLY);
