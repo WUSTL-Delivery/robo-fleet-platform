@@ -1,0 +1,34 @@
+# Raises this robot's hand: fleet_agent sends help.request, the robot enters the
+# fleet's intervention queue (AUTONOMOUS -> HELP_REQUESTED) and an operator can
+# claim it. Service fleet/request_help. Asking again while already waiting, or
+# while an operator is driving, is harmless: the server keeps the first request.
+#
+# The call does not wait for an operator. It returns as soon as the request is
+# on the wire or known to have failed; watch fleet/lease for what happens next.
+
+# Why the robot needs a human, for the operator's queue: 1 to 256 characters,
+# for example "nav_goal_failed".
+string reason
+
+# Optional details shown with the request: the JSON text of an object, for
+# example {"attempts": 3, "leg": "w12-w13"}. Empty for none.
+string context
+---
+string CODE_OFFLINE = "offline"
+string CODE_INVALID = "invalid_message"
+string CODE_TIMEOUT = "timeout"
+
+# True: help.request was written to an open connection to fleet-server.
+# False: it was not sent; `code` says why. Ask again later if it still matters,
+# nothing is queued.
+bool accepted
+
+# Empty when accepted. Otherwise a CODE_* value:
+#   offline          no connection to fleet-server right now
+#   invalid_message  reason is empty or longer than 256 characters, or context
+#                    is not the JSON text of an object (the server would refuse it)
+#   timeout          fleet_agent's link thread did not take the request in time
+string code
+
+# A sentence for the log.
+string message

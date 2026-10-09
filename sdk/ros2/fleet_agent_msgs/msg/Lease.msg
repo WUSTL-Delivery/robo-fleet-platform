@@ -27,11 +27,15 @@ string lease_id
 string operator_id
 
 # Why the last lease ended (a REASON_* value, or a newer one this file does not
-# list yet). Empty while `held` and before the first lease.
+# list yet). Empty while `held` and before the first lease. Also empty when the
+# lease ended while the robot was disconnected (the server restarted, or the
+# lease ran out during a network drop): the robot learns on reconnecting that
+# it is gone, not why. `lease_id` then still names the lease that ended.
 string reason
 
 # The robot's intervention state, a MODE_* value: teleop while held; after a
-# lease ends, autonomous if the operator handed back, help if it was lost.
+# lease ends, autonomous if the operator handed back, help if it was lost (for
+# any other reason, or for none known). Also help after fleet/request_help.
 string mode
 
 # False while the link to fleet-server is down. A lease survives a short drop
