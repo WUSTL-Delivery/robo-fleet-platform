@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"fleetplatform/server/internal/protocol"
+	"fleetplatform/sdk/go/protocol"
 )
 
 var (

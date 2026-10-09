@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"fleetplatform/server/internal/protocol"
+	"fleetplatform/sdk/go/protocol"
 )
 
 func layerEnv(typ, id, body string) protocol.Envelope {

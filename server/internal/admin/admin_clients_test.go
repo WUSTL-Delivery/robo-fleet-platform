@@ -11,8 +11,8 @@ import (
 
 	"github.com/coder/websocket"
 
+	"fleetplatform/sdk/go/protocol"
 	"fleetplatform/server/internal/admin"
-	"fleetplatform/server/internal/protocol"
 	"fleetplatform/server/internal/store"
 )
 
