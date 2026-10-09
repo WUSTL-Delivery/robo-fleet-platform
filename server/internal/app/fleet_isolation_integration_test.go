@@ -54,6 +54,23 @@ func (c *client) nextEvent(name, robotID string) protocol.Event {
 	return ev
 }
 
+// nextOperatorEvent reads an operator.* presence event and checks all of it:
+// the subject is operator_id (never robot_id), and data is the operator's entry.
+func (c *client) nextOperatorEvent(name, operatorID string) protocol.OperatorSummary {
+	c.t.Helper()
+	var ev protocol.Event
+	mustUnmarshal(c.t, c.nextOf(protocol.TypeEvent).Payload, &ev)
+	if ev.Event != name || ev.OperatorID != operatorID || ev.RobotID != "" {
+		c.t.Fatalf("want event %s for %s next, got %+v", name, operatorID, ev)
+	}
+	var sum protocol.OperatorSummary
+	mustUnmarshal(c.t, ev.Data, &sum)
+	if sum.OperatorID != operatorID || sum.Online != (name == protocol.EventOperatorOnline) {
+		c.t.Fatalf("%s data for %s: %+v", name, operatorID, sum)
+	}
+	return sum
+}
+
 func (c *client) nextError() protocol.ErrorMsg {
 	c.t.Helper()
 	var e protocol.ErrorMsg
@@ -86,8 +103,30 @@ func onlyRobot(t *testing.T, snap protocol.Snapshot, robotID string) protocol.Ro
 	return snap.Robots[0]
 }
 
+// onlyOperators asserts the snapshot lists exactly the given operators (id →
+// online), in any order.
+func onlyOperators(t *testing.T, snap protocol.Snapshot, want map[string]bool) {
+	t.Helper()
+	if snap.Operators == nil {
+		t.Fatalf("snapshot has no operators array: %+v", snap)
+	}
+	got := map[string]bool{}
+	for _, o := range snap.Operators {
+		got[o.OperatorID] = o.Online
+	}
+	if len(got) != len(snap.Operators) || len(got) != len(want) {
+		t.Fatalf("snapshot operators %+v, want %v", snap.Operators, want)
+	}
+	for id, online := range want {
+		if g, ok := got[id]; !ok || g != online {
+			t.Fatalf("snapshot operators %+v, want %v", snap.Operators, want)
+		}
+	}
+}
+
 // TestIntegrationTwoFleetIsolation runs two unrelated fleets on one server and
-// shows that nothing crosses between them: snapshots, presence, telemetry,
+// shows that nothing crosses between them: snapshots (robots and operators),
+// robot and operator presence, telemetry,
 // help and lease events, lease claim/renew/release, twist, signaling, channel
 // messages, layers and their retained replay, and the admin API's client
 // revoke. Every cross-fleet id is answered exactly like an id that does not
@@ -129,8 +168,8 @@ func TestIntegrationTwoFleetIsolation(t *testing.T) {
 	robotBTok, robotBID := enroll(fleetB, store.KindRobot, "bot")
 	svcATok, svcAID := enroll(fleetA, store.KindService, "brain")
 	svcBTok, svcBID := enroll(fleetB, store.KindService, "brain")
-	lateATok, _ := enroll(fleetA, store.KindOperator, "late")
-	lateBTok, _ := enroll(fleetB, store.KindOperator, "late")
+	lateATok, lateAID := enroll(fleetA, store.KindOperator, "late")
+	lateBTok, lateBID := enroll(fleetB, store.KindOperator, "late")
 
 	const ghost = "r_0000000000000000" // an id nobody was ever issued
 
@@ -142,10 +181,14 @@ func TestIntegrationTwoFleetIsolation(t *testing.T) {
 	if sum := onlyRobot(t, snap, robotAID); sum.Presence != "offline" {
 		t.Fatalf("fleet A snapshot before connect: %+v", sum)
 	}
+	onlyOperators(t, snap, map[string]bool{opAID: true, lateAID: false})
 	opB := h.connect(opBTok)
 	opB.send(protocol.TypeSubscribe, protocol.Subscribe{Topics: allTopics})
 	mustUnmarshal(t, opB.nextOf(protocol.TypeSnapshot).Payload, &snap)
 	onlyRobot(t, snap, robotBID)
+	onlyOperators(t, snap, map[string]bool{opBID: true, lateBID: false})
+	// Fleet B's operator coming online is not fleet A's news.
+	onlyOperators(t, opA.quiet(), map[string]bool{opAID: true, lateAID: false})
 
 	manifest := protocol.Manifest{
 		Drive:    &protocol.Drive{Type: "twist", MaxVMps: 1, MaxWRadps: 1},
@@ -351,16 +394,28 @@ func TestIntegrationTwoFleetIsolation(t *testing.T) {
 	lateA.send(protocol.TypeSubscribe, protocol.Subscribe{Topics: allTopics})
 	mustUnmarshal(t, lateA.nextOf(protocol.TypeSnapshot).Payload, &snap)
 	onlyRobot(t, snap, robotAID)
+	onlyOperators(t, snap, map[string]bool{opAID: true, lateAID: true})
 	expectLayer(lateA, "Fleet A layer", `{"fleet":"a"}`)
 	lateA.quiet()
+	// Operator presence: fleet A hears its own operator arrive, fleet B does not.
+	if sum := opA.nextOperatorEvent(protocol.EventOperatorOnline, lateAID); sum.Name != "late" {
+		t.Fatalf("operator.online data: %+v", sum)
+	}
+	opA.quiet()
+	onlyOperators(t, opB.quiet(), map[string]bool{opBID: true, lateBID: false})
 	lateB := h.connect(lateBTok)
 	lateB.send(protocol.TypeSubscribe, protocol.Subscribe{Topics: allTopics})
 	mustUnmarshal(t, lateB.nextOf(protocol.TypeSnapshot).Payload, &snap)
 	if sum := onlyRobot(t, snap, robotBID); sum.Lease == nil || *sum.Lease != leaseB {
 		t.Fatalf("late fleet B snapshot: %+v", sum)
 	}
+	onlyOperators(t, snap, map[string]bool{opBID: true, lateBID: true})
 	expectLayer(lateB, "Fleet B layer", `{"fleet":"b"}`)
 	lateB.quiet()
+	opB.nextOperatorEvent(protocol.EventOperatorOnline, lateBID)
+	opB.quiet()
+	opA.quiet()
+	lateA.quiet()
 
 	// --- admin API: revoking through fleet A cannot reach fleet B's clients ---
 	revoke := func(fleet, id string) (int, string) {
@@ -408,12 +463,14 @@ func TestIntegrationTwoFleetIsolation(t *testing.T) {
 		t.Fatalf("operator loss revocation: %+v", revoked)
 	}
 	lateB.nextEvent(protocol.EventRobotLeaseRevoked, robotBID)
+	lateB.nextOperatorEvent(protocol.EventOperatorOffline, opBID)
+	onlyOperators(t, lateB.quiet(), map[string]bool{opBID: false, lateBID: true})
 	robotB.ws.Close(websocket.StatusNormalClosure, "gone")
 	lateB.nextEvent(protocol.EventRobotOffline, robotBID)
 	lateB.quiet()
 
 	// Fleet A heard none of it, and its own flow still works end to end.
-	opA.quiet()
+	onlyOperators(t, opA.quiet(), map[string]bool{opAID: true, lateAID: true})
 	lateA.quiet()
 	svcA.quiet()
 	if sum := onlyRobot(t, robotA.quiet(), robotAID); sum.State != protocol.StateAutonomous || sum.Lease != nil {
