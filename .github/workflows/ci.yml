@@ -172,6 +172,7 @@ jobs:
           cache-dependency-path: |
             sdk/typescript/package-lock.json
             sim/package-lock.json
+            console/package-lock.json
 
       # The sim depends on the SDK via "file:../sdk/typescript" (built dist/).
       - name: build SDK
@@ -183,6 +184,12 @@ jobs:
         with:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
+
+      # The data-plane test drives the console's own twist transport module
+      # (console/src/teleop/twistTransport.ts), so its dependencies must resolve.
+      - name: install console dependencies
+        working-directory: console
+        run: npm ci
 
       - name: typecheck and test
         working-directory: sim
