@@ -171,7 +171,7 @@ await robot.close()
 | `await request_help(reason, context=None)` | `help.request`: the robot raises its hand for an operator |
 | `Robot(..., data_channel=None, ice_servers=None)` | nothing on the wire. With the `webrtc` extra installed the robot answers the lease holder's WebRTC offer; see [Twist over WebRTC](#twist-over-webrtc) |
 | `on_twist(handler)` | `handler(TwistCommand)`: `linear_x`, `linear_y`, `angular_z`, `source` (`operator`, `deadman`, `revoked`, `disconnected`), `lease_id`, `is_stop`, `via` (`bus` or `p2p` for an operator setpoint, `None` for a stop) |
-| `on_lease(handler)` | `handler(LeaseChange)`: `granted`, `lease_id`, `operator_id`, `reason` on revoke |
+| `on_lease(handler)` | `handler(LeaseChange)`: `granted`, `lease_id`, `operator_id`, `reason` on revoke (`None` when the lease ended while the robot was disconnected) |
 | `channel(name).on_message(handler)` | `handler(sender, data)` for `channel.message`; `sender` is stamped by the server |
 | `channel(name).on_acked(handler)` | `handler(sender, data)` once per acked send, with the inner `data`; the SDK publishes `{"ack": seq}` back when it returns without raising, and again for every repeat. See [Acked receive](#acked-receive) |
 | `await channel(name).publish(data, to=None)` | `channel.publish`, directed or broadcast. A directed send waits 0.5 s for a `not_found` reply; silence is not a delivery receipt |
@@ -246,7 +246,19 @@ waiting for the server:
 
 - no valid twist for 300 ms (`deadman_ms`): a zero-velocity command with source `deadman`;
 - lease revoked (handback, expiry, steal, operator lost): a stop with source `revoked`;
-- link lost: a stop with source `disconnected`.
+- link lost: a stop with source `disconnected`;
+- reconnected, and the server no longer holds the lease: a stop with source `revoked`.
+
+A lease is never trusted across a reconnect. The server keeps it through a link blip, but
+it can also end while the robot is away (expiry, handback, the operator leaving) with
+nobody to tell. So the robot obeys nothing from the moment the link drops, and on the
+`welcome` of the next connection it replaces what it believed with the lease that welcome
+states: the same lease is kept and driving resumes, a different one is taken like a new
+grant, and none drops it. A welcome that does not say (a server older than
+`welcome.lease`) confirms nothing either, so against such a server every reconnect ends
+the lease on the robot's side and the operator has to claim again. `on_lease` gets the
+drop as a revoke with `reason=None`, since the robot was not there to hear why, and
+`robot.mode` becomes `help`. See `protocol/README.md`, "A robot's lease at connect".
 
 So an `on_twist` handler that forwards every command to the base is already safe. A
 robot that also runs its own autonomy should pause it on `on_lease` grant and decide on

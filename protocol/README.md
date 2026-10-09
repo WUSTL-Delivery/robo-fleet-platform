@@ -26,7 +26,7 @@ rejected for typed clients; domain traffic never invents envelope types — it r
 | type | direction | purpose |
 |---|---|---|
 | `enroll.request` / `enroll.response` | client → server / reply | one-time: enrollment key → per-client token (Tailscale auth-key pattern) |
-| `hello` / `welcome` | client → server / reply | authenticate; identity is **derived from the token, never claimed** |
+| `hello` / `welcome` | client → server / reply | authenticate; identity is **derived from the token, never claimed**. A robot's `welcome` also states the lease it holds (see [A robot's lease at connect](#a-robots-lease-at-connect)) |
 | `heartbeat` | client → server | presence; silence ⇒ offline (welcome carries the interval) |
 | `manifest` | robot → server | capability declaration; console renders only what's declared |
 | `telemetry` | robot → server | frame-relative pose, velocity, battery, health |
@@ -102,6 +102,74 @@ over from another operator. Claims on a free robot, renewals and handback are un
 
 Golden examples: `fixtures/valid/lease-claim.json`, `fixtures/valid/lease-claim-steal.json`,
 `fixtures/valid/error-claim-conflict.json`.
+
+## A robot's lease at connect
+
+The server does not end a lease because the robot's connection dropped: a Wi-Fi blip
+must not end a takeover. But a lease can end while the robot is away (handback, expiry,
+the operator leaving), and the `lease.revoked` sent at that moment reaches no robot. So
+every `welcome` to a robot states the lease the server holds for it as that connection
+begins:
+
+```json
+{ "client_id": "r_1a2b3c4d", "fleet_id": "f_00000001", "kind": "robot",
+  "server_time_ms": 1755100040123, "heartbeat_interval_ms": 10000,
+  "lease": { "lease_id": "ls_7f8e9d0c", "robot_id": "r_1a2b3c4d",
+             "operator_id": "o_9c8d7e6f", "expires_at_ms": 1755100048000 } }
+```
+
+`lease` is the same object as `lease.granted`, or `null` when the server holds no lease
+for the robot. The server sends the member on every robot welcome, the first one included.
+A welcome to an operator or a service has no `lease` member.
+
+**The robot replaces what it believed with what the welcome says.** MUST, in every case:
+
+| `welcome.lease` | the robot believed it held | the robot |
+|---|---|---|
+| a lease | that same `lease_id` | keeps it and is driven again |
+| a lease | nothing, or a different lease | takes it exactly as it takes `lease.granted`: zero velocity first, any peer connection of the old lease closed |
+| `null` | a lease | drops it exactly as on `lease.revoked`: zero velocity, peer connection closed, lease forgotten |
+| `null` | nothing | nothing to do |
+| member absent | anything | same as `null` |
+
+- **A robot never trusts its own memory of a lease across a reconnect.** From the moment
+  its control connection is lost until the next `welcome`, it obeys no twist on either
+  transport (there is no bus, and channel twist is refused while the connection is not
+  open; see [the data channel](#the-data-channel)). The stop at the moment of loss is
+  immediate and waits for nothing. Only being driven again waits, and it waits for the
+  one message that proves the lease is still the server's.
+- **A welcome without the member confirms nothing.** A server older than this field
+  sends none, so a robot that reconnects to one holds no lease afterwards and its
+  operator has to claim again. That is the price of failing closed; the alternative is a
+  robot that obeys a lease nobody can vouch for.
+- **Nothing crosses the welcome.** The server orders each robot welcome with every
+  grant and revocation of that robot's lease. No `lease.granted` or `lease.revoked`
+  for the robot is sent on a connection before its `welcome`, the welcome is exact as
+  of its place in the stream, and each one that follows applies on top of it in order.
+  A robot that reads its connection in order always ends up holding what the server
+  holds.
+- **`null` does not say why.** The reason was announced while the robot was away, in
+  the fleet's `robot.lease_revoked` or `robot.lease_released`. The welcome carries
+  neither the reason nor the robot's intervention state, so a robot cannot tell a
+  handback from an expiry here. The SDKs' robots treat it as the cautious one: they
+  count themselves as needing help, not as handed back.
+- **A robot cannot be claimed while it is offline** (`error{code: not_found}`), so a
+  welcome that names a lease the robot does not know is rare: the robot process
+  restarted while it was leased, or the grant was sent in the instant its connection
+  dropped.
+- The deadman is untouched by any of this: 300 ms after the last twist it obeyed, the
+  robot stops, whatever its lease.
+
+**The fleet hears a revocation whether or not the robot is connected.**
+`robot.lease_revoked` goes to the `events` subscribers of the robot's fleet for every
+revocation (`expired`, `operator_lost`, `stolen`), and `robot.lease_released` for every
+handback, including while the robot is offline. A subscriber therefore sees the robot
+return to the queue the moment it happens, with the `help` entry in the event, and MUST
+accept these events for a robot whose presence is `offline`.
+
+Golden examples: `fixtures/valid/welcome-robot-lease.json`,
+`fixtures/valid/welcome-robot-no-lease.json`, `fixtures/valid/welcome.json` (no member:
+not a robot's, or an older server's).
 
 ## Help details (the intervention queue entry)
 
@@ -540,7 +608,10 @@ or not one of the three shapes below.
   twist dropped at step 2 MUST NOT move the remembered `seq`. The mark starts at 0 for
   each new channel.
 - A robot whose control connection to the server is not open MUST NOT obey twist from
-  the channel: it could not hear a revocation. It resumes when the connection is back.
+  the channel: it could not hear a revocation. It resumes when the connection is back
+  and its `welcome` states the same lease (see
+  [A robot's lease at connect](#a-robots-lease-at-connect)); if the welcome states
+  another lease or none, the channel is closed with the lease it belonged to.
 - Only an obeyed twist moves the remembered `seq`. A twist the robot does not obey for
   any other reason (its control connection is down, its manifest declares no drive) is
   dropped like one refused at step 2 and leaves the mark where it was.
@@ -604,6 +675,7 @@ Teardown is cleanup that follows a lease decision. It is never how a lease ends.
 | a new offer under the same lease | closes the old session, answers the new one | |
 | peer connection `failed` / `closed`, channel closed | closes the session; keeps the lease and waits for a new offer | falls back to the bus; may offer again |
 | control connection to the server lost | keeps the peer but obeys no channel twist until it is back | keeps driving on the channel if it is live; the server revokes the lease if the operator stays gone |
+| `welcome` after a reconnect | same lease: resumes on the peer it kept. Another lease or none: closes the peer and forgets the old lease | |
 
 A twist that arrives on a channel after the lease is gone bears a lease the robot no
 longer holds and is dropped like any other.

@@ -5,6 +5,10 @@
 // - Deadman: ~300 ms without a valid twist → zero velocity. The robot fails
 //   closed on its own; it never waits for the server to say the operator left.
 // - Losing the lease or the link zeroes velocity immediately.
+// - A lease is never trusted across a reconnect: the welcome of each new
+//   connection states the lease the server holds for this robot, and confirm()
+//   replaces what the gate believed with it (protocol/README.md, "A robot's
+//   lease at connect").
 // - Twist can arrive two ways: over the control-plane bus, or over the direct
 //   WebRTC data channel ("p2p"). The operator sends each twist on one of them.
 //   A bus twist is ignored while a data-channel twist was accepted within the
@@ -54,9 +58,33 @@ export class TeleopGate {
     this.#halt();
   }
 
-  /** Stop now but keep the lease (the link blipped; the server still holds it). */
+  /**
+   * Stop now but keep the lease id. The link blipped: the server probably
+   * still holds the lease, but only the next welcome can say so; see confirm().
+   */
   halt(): void {
     this.#halt();
+  }
+
+  /**
+   * The lease the welcome of a new connection states for this robot
+   * (`undefined` for null, and for a welcome that does not say: an older
+   * server confirms nothing). The gate ends up holding exactly that:
+   *
+   * - "kept": the lease it already held; twists under it are obeyed again.
+   * - "granted": a lease it did not hold, taken as grant() takes one.
+   * - "dropped": it held one the server no longer does; cleared and stopped.
+   * - "none": it held nothing and still does.
+   */
+  confirm(leaseId: string | undefined): "kept" | "granted" | "dropped" | "none" {
+    if (leaseId === undefined) {
+      if (this.#leaseId === undefined) return "none";
+      this.clear();
+      return "dropped";
+    }
+    if (leaseId === this.#leaseId) return "kept";
+    this.grant(leaseId);
+    return "granted";
   }
 
   /**

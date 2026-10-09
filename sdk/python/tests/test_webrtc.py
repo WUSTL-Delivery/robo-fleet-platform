@@ -31,6 +31,7 @@ from fleet.webrtc import (  # noqa: E402
     TwistAnswerer,
     parse_channel_message,
 )
+from test_lease_reconnect import LinkGate  # noqa: E402
 from test_robot import RawOperator, TwistLog, _env, start_operator, start_robot, wait_until  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parents[3] / "protocol" / "fixtures" / "datachannel"
@@ -469,6 +470,40 @@ async def test_channel_twist_is_not_obeyed_while_the_control_connection_is_down(
     link.twist(0.3)
     _, cmd = await twists.wait_for(lambda c: c.via == "p2p" and c.linear_x == 0.3)
     assert cmd.lease_id == lease
+
+
+async def test_channel_twist_on_a_lease_that_expired_while_the_control_connection_was_down_drives_nothing(
+    short_lease_server, teardown, monkeypatch
+):
+    # The hole this closes: the peer outlives a control-link blip, so an operator
+    # end that keeps sending could drive a robot whose lease the server revoked
+    # while the robot could not be told.
+    robot, twists, op, lease, link = await connected(short_lease_server, teardown)
+    link.twist(0.5)
+    await twists.wait_for(lambda c: c.via == "p2p")
+
+    gate = LinkGate(monkeypatch)
+    gate.cut(robot)
+    await twists.wait_for(lambda c: c.source == "disconnected")
+    revoked = await op.expect("lease.revoked", timeout=short_lease_server.lease_ttl_ms / 1000 + 3)
+    assert revoked["lease_id"] == lease and revoked["reason"] == "expired"
+    assert await link.ping(7) == {"pong": 7}  # the peer is still up: only the lease is gone
+    assert robot.state is not ConnectionState.OPEN
+
+    gate.restore()
+    await wait_until(lambda: robot.state is ConnectionState.OPEN, timeout=5)
+    assert robot.client.welcome["lease"] is None
+    assert robot.lease_id is None and robot.mode == "help"
+    assert not robot.data_channel_open
+    before = len(twists.items)
+    for _ in range(4):
+        try:
+            link.twist(0.9)
+        except Exception:  # noqa: BLE001 - the robot closed its end: equally nothing to obey
+            break
+        await asyncio.sleep(0.05)
+    await asyncio.wait_for(link.closed.wait(), 5)
+    assert len(twists.items) == before, twists.items[before:]
 
 
 async def test_data_channel_off_means_no_answer_and_bus_twist_still_drives(fleet_server, teardown):

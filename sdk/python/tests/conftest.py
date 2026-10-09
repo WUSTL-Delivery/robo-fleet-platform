@@ -5,6 +5,9 @@ mock. ``fleet_server`` builds ``server/cmd/fleet-server`` once per session with
 ``go build``, starts it on a free loopback port with a temp sqlite db, a declared
 fleet + enrollment key, an admin token, and a short heartbeat interval, and waits
 for ``/healthz`` before handing tests a :class:`FleetServer`.
+
+``short_lease_server`` is a second server from the same binary whose leases
+expire after two seconds, for the tests that need a lease to run out.
 """
 
 from __future__ import annotations
@@ -37,13 +40,13 @@ class FleetServer:
     enroll_key: str
     admin_token: str
     heartbeat_interval_ms: int
+    #: How long a lease lives without a renewal (the server's lease_ttl_ms).
+    lease_ttl_ms: int = 15_000
+    log_path: Path | None = None
 
     def log(self) -> str:
         """Everything the server printed so far (useful in assertion messages)."""
-        return _LOG_PATH.read_text() if _LOG_PATH is not None and _LOG_PATH.exists() else ""
-
-
-_LOG_PATH: Path | None = None
+        return self.log_path.read_text() if self.log_path is not None and self.log_path.exists() else ""
 
 
 def _free_port() -> int:
@@ -68,42 +71,46 @@ def _wait_healthy(http_url: str, proc: subprocess.Popen[bytes], log_path: Path) 
 
 
 @pytest.fixture(scope="session")
-def fleet_server() -> Iterator[FleetServer]:
-    """A real fleet-server for the whole test session."""
-    global _LOG_PATH
+def fleet_server_binary() -> Iterator[Path]:
+    """fleet-server, built once per test session."""
     if shutil.which("go") is None:
         pytest.skip("go toolchain not found; fleet-server cannot be built")
-
-    tmp = Path(tempfile.mkdtemp(prefix="fleet-sdk-python-"))
+    tmp = Path(tempfile.mkdtemp(prefix="fleet-sdk-python-bin-"))
     binary = tmp / "fleet-server"
-    subprocess.run(
-        ["go", "build", "-o", str(binary), "./cmd/fleet-server"],
-        cwd=SERVER_DIR,
-        check=True,
-    )
+    try:
+        subprocess.run(["go", "build", "-o", str(binary), "./cmd/fleet-server"], cwd=SERVER_DIR, check=True)
+        yield binary
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
+
+def _run_server(binary: Path, fleet: str, lease_ttl_ms: int) -> Iterator[FleetServer]:
+    """Starts the binary on a free loopback port with its own temp database."""
+    tmp = Path(tempfile.mkdtemp(prefix="fleet-sdk-python-"))
     port = _free_port()
+    log_path = tmp / "server.log"
     server = FleetServer(
         ws_url=f"ws://127.0.0.1:{port}/ws",
         http_url=f"http://127.0.0.1:{port}",
-        fleet="sdk-python",
+        fleet=fleet,
         enroll_key="sdk-python-enroll-key-0123456789",
         admin_token="sdk-python-admin-token-0123456789",
         # Short so a test can outlast several intervals and prove heartbeats keep it alive.
         heartbeat_interval_ms=200,
+        lease_ttl_ms=lease_ttl_ms,
+        log_path=log_path,
     )
     env = {
         **os.environ,
         "FLEET_LISTEN": f"127.0.0.1:{port}",
         "FLEET_DB": str(tmp / "fleet.db"),
         "FLEET_HEARTBEAT_INTERVAL_MS": str(server.heartbeat_interval_ms),
+        "FLEET_LEASE_TTL_MS": str(lease_ttl_ms),
         "FLEET_SWEEP_MS": "50",
         "FLEET_BOOTSTRAP_FLEET": server.fleet,
         "FLEET_BOOTSTRAP_ENROLL_KEY": server.enroll_key,
         "FLEET_ADMIN_TOKEN": server.admin_token,
     }
-    log_path = tmp / "server.log"
-    _LOG_PATH = log_path
     with open(log_path, "wb") as log:
         proc = subprocess.Popen([str(binary)], cwd=tmp, env=env, stdout=log, stderr=subprocess.STDOUT)
     try:
@@ -118,4 +125,15 @@ def fleet_server() -> Iterator[FleetServer]:
                 proc.kill()
                 proc.wait()
         shutil.rmtree(tmp, ignore_errors=True)
-        _LOG_PATH = None
+
+
+@pytest.fixture(scope="session")
+def fleet_server(fleet_server_binary: Path) -> Iterator[FleetServer]:
+    """A real fleet-server for the whole test session."""
+    yield from _run_server(fleet_server_binary, "sdk-python", lease_ttl_ms=15_000)
+
+
+@pytest.fixture(scope="session")
+def short_lease_server(fleet_server_binary: Path) -> Iterator[FleetServer]:
+    """A second real fleet-server whose leases expire two seconds after the last renewal."""
+    yield from _run_server(fleet_server_binary, "sdk-python-short-lease", lease_ttl_ms=2_000)

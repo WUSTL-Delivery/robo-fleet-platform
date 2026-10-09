@@ -2,7 +2,9 @@
 // deadman. It speaks the real protocol, so everything built against the sim
 // works unchanged against a real robot running fleet_agent.
 //
-// On every (re)connect it declares its manifest. It then sends telemetry at
+// On every (re)connect it takes its lease from the welcome (the one it held
+// before the link dropped counts for nothing unless the server still names it)
+// and declares its manifest. It then sends telemetry at
 // `telemetryHz` with a pose integrated from the twist it last accepted, obeys
 // twist only under its current lease, and zeroes velocity DEADMAN_MS after the
 // last valid twist. Twist arrives over the bus or, once the operator holding
@@ -13,6 +15,7 @@
 import {
   FleetClient,
   FleetClientError,
+  type Lease,
   type Manifest,
   type Pose,
   type TelemetryPayload,
@@ -226,8 +229,11 @@ export class SimRobot {
 
     client.onState((s) => {
       if (s.state === "open") {
-        // Declare on every (re)connect. The lease is kept: the server does not
-        // revoke it when a robot's link drops, so the operator's twists resume.
+        // Before anything else on this connection: the server keeps a lease
+        // through a robot's link blip, but it may also have ended it while the
+        // robot could not be told. Only the welcome says which.
+        this.#confirmLease(client, s.welcome?.lease);
+        // Declare on every (re)connect: the server forgets the manifest on a drop.
         client.send("manifest", this.manifest());
       } else if (s.state === "reconnecting" || s.state === "closed") {
         this.#gate.halt(); // fail closed while the link is down
@@ -259,6 +265,34 @@ export class SimRobot {
     client.on("signal", ({ payload }) => this.#peer?.onSignal(payload));
 
     return client;
+  }
+
+  /**
+   * welcome.lease: the lease the server holds for this robot as the connection
+   * begins. null, or no member at all (a server older than the field), means
+   * none, whatever the robot held before the link dropped.
+   */
+  #confirmLease(client: FleetClient, stated: Lease | null | undefined): void {
+    const lease = stated && stated.robot_id === client.clientId ? stated : undefined;
+    switch (this.#gate.confirm(lease?.lease_id)) {
+      case "granted":
+        // The robot did not know of it: it restarted, or the grant crossed the drop.
+        this.#peer?.grant(lease!.lease_id, lease!.operator_id);
+        this.#lastVia = undefined;
+        this.#mode = "teleop";
+        this.#log(`lease held for ${lease!.operator_id} (from welcome)`);
+        return;
+      case "dropped":
+        this.#peer?.revoke(); // cleanup: the lease is already gone
+        this.#lastVia = undefined;
+        // The welcome does not say why. Assume the cautious reason: not a handback.
+        this.#mode = "help";
+        this.#log("lease ended while disconnected");
+        return;
+      case "kept":
+      case "none":
+        return;
+    }
   }
 
   /** One twist from either transport, judged by the same gate. */

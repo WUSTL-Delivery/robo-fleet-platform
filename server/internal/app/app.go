@@ -58,6 +58,18 @@ type App struct {
 	// server. It is taken before mu, never while holding it.
 	opMu sync.Mutex
 
+	// leaseMu orders every change to a robot's lease with the message that
+	// tells the robot of it, and against the lease a connecting robot is
+	// welcomed with. ops decides each transition under its own lock, but the
+	// announcement leaves after that lock is released, so without this a
+	// welcome built from the lease table could be queued after the revocation
+	// of the very lease it names, and the robot would go on holding a lease
+	// the server does not. Held across decide + announce, a robot that reads
+	// its connection in order always arrives at the lease ops holds. Nothing
+	// blocks under it: sends are queue appends. It is taken after opMu and
+	// before mu.
+	leaseMu sync.Mutex
+
 	mu    sync.Mutex
 	conns map[string]*gateway.Conn // clientID → live conn
 	// watching is operator id → the robot that operator's live connection
@@ -106,9 +118,11 @@ func (a *App) Run(ctx context.Context) {
 				}
 			}
 			// Leases: expiry is the server's transition (§7.5), robot → HELP_REQUESTED.
+			a.leaseMu.Lock()
 			for _, rv := range a.ops.SweepExpired() {
 				a.notifyRevoked(rv)
 			}
+			a.leaseMu.Unlock()
 			ttl := a.cfg.LayerTTL
 			if ttl <= 0 {
 				ttl = DefaultLayerTTL
@@ -170,10 +184,22 @@ func (a *App) Hello(h protocol.Hello) (store.Client, *protocol.ErrorMsg) {
 
 // --- gateway.Handler ---
 
-func (a *App) OnConnect(c *gateway.Conn) {
-	if c.Client.Kind == store.KindOperator {
+// OnConnect registers the connection, then welcomes it. A robot's welcome
+// states the lease the server holds for it (protocol/README.md, "A robot's
+// lease at connect"): its connection may have dropped and come back while the
+// lease ended, and the revocation sent then reached nobody.
+func (a *App) OnConnect(c *gateway.Conn, welcome protocol.Welcome) {
+	switch c.Client.Kind {
+	case store.KindOperator:
 		a.opMu.Lock()
 		defer a.opMu.Unlock()
+	case store.KindRobot:
+		// Held from before the connection can be found (a.conns) until its
+		// welcome is queued: no grant or revocation for this robot can reach
+		// the new connection ahead of the welcome, and none can be decided
+		// between reading the lease and queueing it.
+		a.leaseMu.Lock()
+		defer a.leaseMu.Unlock()
 	}
 	a.mu.Lock()
 	prev := a.conns[c.Client.ID]
@@ -189,6 +215,15 @@ func (a *App) OnConnect(c *gateway.Conn) {
 	if c.Client.Kind == store.KindService {
 		a.lay.OwnerUp(c.Client.ID)
 	}
+	if c.Client.Kind == store.KindRobot {
+		var held *protocol.Lease
+		if _, lease, _ := a.ops.StateOf(c.Client.ID); lease != nil {
+			lp := lease.Proto()
+			held = &lp
+		}
+		welcome.Lease = protocol.HoldsLease(held)
+	}
+	c.Send(protocol.Msg(protocol.TypeWelcome, welcome))
 	switch c.Client.Kind {
 	case store.KindRobot:
 		a.emit(c.Client.FleetID, bus.TopicPresence, protocol.Event{Event: protocol.EventRobotOnline, RobotID: c.Client.ID})
@@ -229,9 +264,11 @@ func (a *App) OnDisconnect(c *gateway.Conn) {
 		a.lay.OwnerDown(c.Client.ID, time.Now())
 	case store.KindOperator:
 		// Operator loss is the server's transition, never the robot's (§7.5).
+		a.leaseMu.Lock()
 		for _, rv := range a.ops.DropOperator(c.Client.ID) {
 			a.notifyRevoked(rv)
 		}
+		a.leaseMu.Unlock()
 		// The offline entry carries no watching: this one event clears it.
 		a.emitOperator(protocol.EventOperatorOffline, c.Client, false, "")
 	}
@@ -326,18 +363,7 @@ func (a *App) OnMessage(c *gateway.Conn, env protocol.Envelope) {
 		if !parse(c, env, &rel) {
 			return
 		}
-		lease, err := a.ops.Release(rel.LeaseID, c.Client.ID)
-		if err != nil {
-			c.Send(errMsg(protocol.ErrNotFound, "no such lease held", env.ID))
-			return
-		}
-		revoked := protocol.LeaseRevoked{LeaseID: lease.ID, RobotID: lease.RobotID, Reason: protocol.RevokeReleased}
-		if rc := a.conn(lease.RobotID); rc != nil {
-			rc.Send(protocol.Msg(protocol.TypeLeaseRevoked, revoked))
-		}
-		a.emit(c.Client.FleetID, bus.TopicEvents, protocol.Event{
-			Event: protocol.EventRobotLeaseReleased, RobotID: lease.RobotID, Data: mustJSON(revoked),
-		})
+		a.handleRelease(c, env, rel)
 
 	case protocol.TypeWatch:
 		if !require(c, env, kind == store.KindOperator) {
@@ -460,7 +486,28 @@ func (a *App) handleLayer(c *gateway.Conn, env protocol.Envelope) {
 	a.fanout(c.Client.FleetID, bus.TopicLayers, env)
 }
 
+// handleRelease is the handback. The robot is told if it is connected; if it
+// is not, its next welcome says it holds no lease.
+func (a *App) handleRelease(c *gateway.Conn, env protocol.Envelope, rel protocol.LeaseRelease) {
+	a.leaseMu.Lock()
+	defer a.leaseMu.Unlock()
+	lease, err := a.ops.Release(rel.LeaseID, c.Client.ID)
+	if err != nil {
+		c.Send(errMsg(protocol.ErrNotFound, "no such lease held", env.ID))
+		return
+	}
+	revoked := protocol.LeaseRevoked{LeaseID: lease.ID, RobotID: lease.RobotID, Reason: protocol.RevokeReleased}
+	if rc := a.conn(lease.RobotID); rc != nil {
+		rc.Send(protocol.Msg(protocol.TypeLeaseRevoked, revoked))
+	}
+	a.emit(c.Client.FleetID, bus.TopicEvents, protocol.Event{
+		Event: protocol.EventRobotLeaseReleased, RobotID: lease.RobotID, Data: mustJSON(revoked),
+	})
+}
+
 func (a *App) handleClaim(c *gateway.Conn, env protocol.Envelope, claim protocol.LeaseClaim) {
+	a.leaseMu.Lock()
+	defer a.leaseMu.Unlock()
 	// The target must be an online robot in the caller's fleet. Another fleet's
 	// robot, or a client that is not a robot, gets the same answer as an id
 	// that does not exist, so ids do not leak across fleets.
@@ -473,7 +520,7 @@ func (a *App) handleClaim(c *gateway.Conn, env protocol.Envelope, claim protocol
 	// inside ops under its lock. A refusal changes nothing and tells nobody but
 	// the caller. It names the lease in the way, which the caller could already
 	// read from its own fleet's snapshot, so a console can say who is driving.
-	lease, stolen, err := a.ops.Claim(claim.RobotID, c.Client.ID, claim.Steal)
+	lease, stolen, err := a.ops.Claim(c.Client.FleetID, claim.RobotID, c.Client.ID, claim.Steal)
 	if err != nil {
 		held := lease.Proto()
 		c.Send(protocol.Msg(protocol.TypeError, protocol.ErrorMsg{
@@ -483,6 +530,8 @@ func (a *App) handleClaim(c *gateway.Conn, env protocol.Envelope, claim protocol
 	}
 	granted := protocol.Msg(protocol.TypeLeaseGranted, lease.Proto())
 	c.Send(granted)
+	// A robot that dropped in this instant is not told here; its next welcome
+	// names this lease.
 	if rc := a.conn(claim.RobotID); rc != nil {
 		rc.Send(granted)
 	}
@@ -698,14 +747,19 @@ func revokedMsg(rv ops.Revoked) protocol.LeaseRevoked {
 	return m
 }
 
+// notifyRevoked announces a lease the server ended (expiry, operator loss) to
+// the robot, the operator and the fleet. The fleet is told whether or not the
+// robot is connected: the robot went back to the queue either way, and a
+// console must not have to wait for its next snapshot to see that. A robot
+// that is away learns of it from its next welcome. The caller holds leaseMu.
 func (a *App) notifyRevoked(rv ops.Revoked) {
 	revoked := revokedMsg(rv)
 	if rc := a.conn(rv.Lease.RobotID); rc != nil {
 		rc.Send(protocol.Msg(protocol.TypeLeaseRevoked, revoked))
-		a.emit(rc.Client.FleetID, bus.TopicEvents, protocol.Event{
-			Event: protocol.EventRobotLeaseRevoked, RobotID: rv.Lease.RobotID, Data: mustJSON(revoked),
-		})
 	}
+	a.emit(rv.Lease.FleetID, bus.TopicEvents, protocol.Event{
+		Event: protocol.EventRobotLeaseRevoked, RobotID: rv.Lease.RobotID, Data: mustJSON(revoked),
+	})
 	a.notifyOperator(rv.Lease.OperatorID, rv)
 }
 

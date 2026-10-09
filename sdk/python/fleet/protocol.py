@@ -51,6 +51,15 @@ class HelloPayload(TypedDict):
 ClientKind = Literal["robot", "service", "operator"]
 
 
+class Lease(TypedDict):
+    """Source: `protocol/schemas/defs.schema.json#/$defs/lease`"""
+
+    lease_id: str
+    robot_id: str
+    operator_id: str
+    expires_at_ms: int
+
+
 class WelcomePayload(TypedDict):
     """Source: `protocol/schemas/auth.schema.json#/$defs/welcome`"""
 
@@ -59,6 +68,8 @@ class WelcomePayload(TypedDict):
     kind: ClientKind
     server_time_ms: int
     heartbeat_interval_ms: int
+    #: To a robot only: the lease the server holds for it as this connection begins, or null when it holds none. A robot replaces whatever it believed with this. Absent for operators and services, and from a server that predates the field: a robot then holds no lease.
+    lease: NotRequired[Union[Lease, None]]
 
 
 class HeartbeatPayload(TypedDict):
@@ -229,15 +240,6 @@ class Manifest(TypedDict):
     battery: NotRequired[ManifestBattery]
     channels: NotRequired[list[ChannelName]]
     behaviors: NotRequired[list[str]]
-
-
-class Lease(TypedDict):
-    """Source: `protocol/schemas/defs.schema.json#/$defs/lease`"""
-
-    lease_id: str
-    robot_id: str
-    operator_id: str
-    expires_at_ms: int
 
 
 class HelpDetails(TypedDict):

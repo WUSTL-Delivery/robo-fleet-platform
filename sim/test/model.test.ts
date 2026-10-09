@@ -113,6 +113,37 @@ describe("TeleopGate", () => {
     expect(g.accept("ls_a", fwd, 2)).toBe(true);
   });
 
+  it("confirm() leaves the gate holding exactly the lease the welcome states", () => {
+    const g = new TeleopGate();
+    // Nothing held, nothing stated.
+    expect(g.confirm(undefined)).toBe("none");
+    expect(g.leaseId).toBeUndefined();
+
+    // The link blipped and the server still holds the lease: driven again.
+    g.grant("ls_a");
+    g.accept("ls_a", fwd, 0);
+    g.halt();
+    expect(g.confirm("ls_a")).toBe("kept");
+    expect(g.current(1)).toEqual({ vx: 0, vy: 0, wz: 0 }); // the old setpoint did not come back
+    expect(g.accept("ls_a", fwd, 2)).toBe(true);
+
+    // The lease ended while the robot was away (or the server did not say): gone, stopped.
+    g.halt();
+    expect(g.confirm(undefined)).toBe("dropped");
+    expect(g.leaseId).toBeUndefined();
+    expect(g.accept("ls_a", fwd, 3)).toBe(false);
+    expect(g.accept("ls_a", fwd, 3, "p2p")).toBe(false);
+    expect(g.current(4)).toEqual({ vx: 0, vy: 0, wz: 0 });
+
+    // The server names a lease the robot did not hold: taken as a grant, the old one refused.
+    g.grant("ls_b");
+    g.accept("ls_b", fwd, 5);
+    expect(g.confirm("ls_c")).toBe("granted");
+    expect(g.current(6)).toEqual({ vx: 0, vy: 0, wz: 0 });
+    expect(g.accept("ls_b", fwd, 7)).toBe(false);
+    expect(g.accept("ls_c", fwd, 7)).toBe(true);
+  });
+
   it("ignores a bus twist while a data-channel twist is fresh, and takes it once the window has passed", () => {
     const g = new TeleopGate();
     const back = { vx: -1, vy: 0, wz: 0 };
