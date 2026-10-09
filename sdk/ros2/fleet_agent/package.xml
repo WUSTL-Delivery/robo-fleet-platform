@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>fleet_agent</name>
+  <version>0.0.1</version>
+  <description>Generic ROS 2 node that connects a robot to fleet-server: manifest from parameters, telemetry from topics.</description>
+  <maintainer email="jaxonp808@gmail.com">Jaxon Poentis</maintainer>
+  <license>Apache-2.0</license>
+
+  <!-- Also needs the Python SDK (sdk/python, distribution "fleet-sdk"), which is
+       not a rosdep key: install it with pip. See sdk/ros2/README.md. -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>launch</test_depend>
+  <test_depend>launch_ros</test_depend>
+  <test_depend>launch_testing</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

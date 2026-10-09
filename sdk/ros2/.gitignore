@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+# colcon output, if a workspace is ever built in place
+build/
+install/
+log/
