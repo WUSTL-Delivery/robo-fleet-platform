@@ -61,7 +61,7 @@ import type {
   ClientKind,
   ErrorPayload,
   EventName,
-  HelpRequestPayload,
+  HelpDetails,
   Lease,
   LeaseRevokedPayload,
   SnapshotPayload,
@@ -171,12 +171,16 @@ export interface FleetEventData {
   "robot.offline": undefined;
   /** The robot's telemetry payload, verbatim. */
   "robot.telemetry": TelemetryPayload;
-  /** The robot's help.request payload, verbatim. */
-  "robot.help_requested": HelpRequestPayload;
+  /**
+   * The queue entry: the robot's help.request (reason, context) plus
+   * requested_at_ms, the server time it entered the queue. The same object is
+   * `help` on a HELP_REQUESTED robot's snapshot entry.
+   */
+  "robot.help_requested": HelpDetails;
   "robot.lease_granted": Lease;
   /** Handback: reason is "released". */
   "robot.lease_released": LeaseRevokedPayload;
-  /** Expiry, steal, or operator loss. */
+  /** Expiry, steal, or operator loss. `help` is set when the robot went back to HELP_REQUESTED. */
   "robot.lease_revoked": LeaseRevokedPayload;
 }
 

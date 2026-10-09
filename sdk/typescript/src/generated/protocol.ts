@@ -139,6 +139,15 @@ export interface Lease {
   expires_at_ms: number;
 }
 
+/** Source: `protocol/schemas/defs.schema.json#/$defs/helpDetails` */
+export interface HelpDetails {
+  reason: string;
+  context?: {
+    [k: string]: unknown;
+  };
+  requested_at_ms: number;
+}
+
 /** Source: `protocol/schemas/defs.schema.json#/$defs/robotSummary` */
 export interface RobotSummary {
   robot_id: string;
@@ -147,6 +156,7 @@ export interface RobotSummary {
   state: RobotState;
   manifest?: Manifest;
   lease?: Lease;
+  help?: HelpDetails;
 }
 
 /** Source: `protocol/schemas/defs.schema.json#/$defs/channelName` */
@@ -216,6 +226,7 @@ export interface LeaseRevokedPayload {
   lease_id: string;
   robot_id: string;
   reason: "released" | "expired" | "stolen" | "operator_lost";
+  help?: HelpDetails;
 }
 
 /** Source: `protocol/schemas/robot.schema.json#/$defs/manifest` */

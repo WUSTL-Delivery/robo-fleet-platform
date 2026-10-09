@@ -30,15 +30,44 @@ func (l Lease) Proto() protocol.Lease {
 	return protocol.Lease{LeaseID: l.ID, RobotID: l.RobotID, OperatorID: l.OperatorID, ExpiresAtMs: l.ExpiresAt.UnixMilli()}
 }
 
-// Revoked pairs a dead lease with why it died.
+// Help is a robot's open intervention queue entry. It is opened when the robot
+// enters HELP_REQUESTED and closed only by a handback, so a robot that is
+// claimed and then lost returns to the queue with its original reason and time.
+type Help struct {
+	Reason      string
+	Context     map[string]any
+	RequestedAt time.Time
+}
+
+func (h Help) Proto() protocol.HelpDetails {
+	return protocol.HelpDetails{Reason: h.Reason, Context: h.Context, RequestedAtMs: h.RequestedAt.UnixMilli()}
+}
+
+// Revoked pairs a dead lease with why it died. Help is the robot's queue entry
+// when the revocation returned it to HELP_REQUESTED, nil otherwise (a steal).
 type Revoked struct {
 	Lease  Lease
 	Reason string // protocol.Revoke*
+	Help   *Help
 }
 
 type robotOps struct {
 	state string
 	lease *Lease
+	help  *Help // open queue entry; survives TELEOP, cleared on handback
+}
+
+// requeue returns a robot whose lease died to HELP_REQUESTED and reports its
+// queue entry. A robot that never asked (claimed proactively) gets an entry
+// opened now, with the revocation reason standing in for the robot's.
+func (r *robotOps) requeue(reason string, now time.Time) *Help {
+	r.lease = nil
+	r.state = protocol.StateHelpRequested
+	if r.help == nil {
+		r.help = &Help{Reason: reason, RequestedAt: now}
+	}
+	h := *r.help
+	return &h
 }
 
 type Ops struct {
@@ -61,29 +90,40 @@ func (o *Ops) get(robotID string) *robotOps {
 	return r
 }
 
-// StateOf returns the robot's FSM state and current lease (nil if none).
-func (o *Ops) StateOf(robotID string) (string, *Lease) {
+// StateOf returns the robot's FSM state, its current lease (nil if none) and,
+// only while HELP_REQUESTED, its queue entry.
+func (o *Ops) StateOf(robotID string) (string, *Lease, *Help) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	r := o.get(robotID)
-	if r.lease == nil {
-		return r.state, nil
+	var lease *Lease
+	if r.lease != nil {
+		l := *r.lease
+		lease = &l
 	}
-	l := *r.lease
-	return r.state, &l
+	var help *Help
+	if r.state == protocol.StateHelpRequested && r.help != nil {
+		h := *r.help
+		help = &h
+	}
+	return r.state, lease, help
 }
 
-// RequestHelp moves AUTONOMOUS → HELP_REQUESTED. Idempotent; a robot already in
-// TELEOP cannot re-queue itself (§7.5: operator loss is the server's transition).
-func (o *Ops) RequestHelp(robotID string) bool {
+// RequestHelp moves AUTONOMOUS → HELP_REQUESTED and opens the queue entry,
+// stamped with the server clock. Idempotent: a repeat request changes nothing
+// (the first reason and time stand) and returns nil. A robot already in TELEOP
+// cannot re-queue itself (§7.5: operator loss is the server's transition).
+func (o *Ops) RequestHelp(robotID, reason string, context map[string]any) *Help {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	r := o.get(robotID)
 	if r.state != protocol.StateAutonomous {
-		return false
+		return nil
 	}
 	r.state = protocol.StateHelpRequested
-	return true
+	r.help = &Help{Reason: reason, Context: context, RequestedAt: o.now()}
+	h := *r.help
+	return &h
 }
 
 // Claim grants an exclusive lease, from HELP_REQUESTED or proactively from
@@ -136,6 +176,7 @@ func (o *Ops) Release(leaseID, operatorID string) (Lease, error) {
 			}
 			l := *r.lease
 			r.lease = nil
+			r.help = nil
 			r.state = protocol.StateAutonomous
 			return l, nil
 		}
@@ -145,16 +186,16 @@ func (o *Ops) Release(leaseID, operatorID string) (Lease, error) {
 
 // DropOperator revokes every lease an operator holds (their presence lapsed or
 // socket dropped). Robots go back to HELP_REQUESTED — front of the queue for the
-// next operator, per §7.5; they never re-queue themselves.
+// next operator, per §7.5, because they keep their original request time; they
+// never re-queue themselves.
 func (o *Ops) DropOperator(operatorID string) []Revoked {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	var out []Revoked
 	for _, r := range o.robots {
 		if r.lease != nil && r.lease.OperatorID == operatorID {
-			out = append(out, Revoked{Lease: *r.lease, Reason: protocol.RevokeOperatorLost})
-			r.lease = nil
-			r.state = protocol.StateHelpRequested
+			lease := *r.lease
+			out = append(out, Revoked{Lease: lease, Reason: protocol.RevokeOperatorLost, Help: r.requeue(protocol.RevokeOperatorLost, o.now())})
 		}
 	}
 	return out
@@ -168,9 +209,8 @@ func (o *Ops) SweepExpired() []Revoked {
 	var out []Revoked
 	for _, r := range o.robots {
 		if r.lease != nil && now.After(r.lease.ExpiresAt) {
-			out = append(out, Revoked{Lease: *r.lease, Reason: protocol.RevokeExpired})
-			r.lease = nil
-			r.state = protocol.StateHelpRequested
+			lease := *r.lease
+			out = append(out, Revoked{Lease: lease, Reason: protocol.RevokeExpired, Help: r.requeue(protocol.RevokeExpired, now)})
 		}
 	}
 	return out

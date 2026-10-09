@@ -233,7 +233,9 @@ Topics:
 
 The immediate reply is one `snapshot` listing every robot the fleet has ever enrolled,
 with `presence`, FSM `state` (`AUTONOMOUS | HELP_REQUESTED | TELEOP`), the `manifest` if
-online, and the current `lease` if any. This is what makes a service restartable: rebuild
+online, the current `lease` if any, and while `HELP_REQUESTED` a `help` object
+(`reason`, `context`, `requested_at_ms`; see "Help details" in `protocol/README.md`).
+This is what makes a service restartable: rebuild
 your world model from the snapshot plus your own database, then apply events. Subscribes
 are additive and can be repeated; each one returns a fresh snapshot.
 

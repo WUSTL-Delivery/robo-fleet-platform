@@ -82,6 +82,16 @@
       "required": ["lease_id", "robot_id", "operator_id", "expires_at_ms"],
       "additionalProperties": false
     },
+    "helpDetails": {
+      "type": "object",
+      "properties": {
+        "reason": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "context": { "type": "object" },
+        "requested_at_ms": { "type": "integer" }
+      },
+      "required": ["reason", "requested_at_ms"],
+      "additionalProperties": false
+    },
     "robotSummary": {
       "type": "object",
       "properties": {
@@ -90,7 +100,8 @@
         "presence": { "$ref": "#/$defs/presence" },
         "state": { "$ref": "#/$defs/robotState" },
         "manifest": { "$ref": "#/$defs/manifest" },
-        "lease": { "$ref": "#/$defs/lease" }
+        "lease": { "$ref": "#/$defs/lease" },
+        "help": { "$ref": "#/$defs/helpDetails" }
       },
       "required": ["robot_id", "presence", "state"],
       "additionalProperties": false

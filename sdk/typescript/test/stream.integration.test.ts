@@ -136,10 +136,22 @@ describe("subscribe, events and channels against fleet-server", () => {
     expect(tel.data.pose).toEqual({ frame: "local", frame_id: "map", x_m: 1, y_m: 2 });
     expect(tel.data.battery?.pct).toBe(80);
 
-    // Help request → robot.help_requested with the reason.
+    // Help request → robot.help_requested with the queue entry: the request
+    // plus the server's requested_at_ms.
     const help = next<FleetEvent<"robot.help_requested">>((h) => brain.onEvent("robot.help_requested", h), (e) => e.robot_id === robotId, "help");
-    robot.send("help.request", { reason: "nav_goal_failed" });
-    expect((await help).data.reason).toBe("nav_goal_failed");
+    const askedAfter = Date.now();
+    robot.send("help.request", { reason: "nav_goal_failed", context: { attempts: 3 } });
+    const asked = (await help).data;
+    expect(asked.reason).toBe("nav_goal_failed");
+    expect(asked.context).toEqual({ attempts: 3 });
+    expect(Number.isInteger(asked.requested_at_ms)).toBe(true);
+    expect(asked.requested_at_ms).toBeGreaterThanOrEqual(askedAfter);
+    expect(asked.requested_at_ms).toBeLessThanOrEqual(Date.now());
+
+    // A fresh snapshot carries the same entry on the HELP_REQUESTED robot.
+    const queued = (await brain.subscribe(["events"])).robots.find((r) => r.robot_id === robotId)!;
+    expect(queued.state).toBe("HELP_REQUESTED");
+    expect(queued.help).toEqual(asked);
 
     // Operator takes over: lease.granted reaches operator and robot (direct
     // messages via on()), the brain sees robot.lease_granted, twist reaches the robot.

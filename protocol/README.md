@@ -51,6 +51,43 @@ rejected for typed clients; domain traffic never invents envelope types — it r
 - Versioning: `v` bumps only on incompatible envelope change; message-level evolution is
   additive (new optional fields) until a type is redesigned under a new name.
 
+## Help details (the intervention queue entry)
+
+While a robot is `HELP_REQUESTED`, its `snapshot` entry carries `help`:
+
+```json
+{ "reason": "nav_goal_failed", "context": { "attempts": 3 }, "requested_at_ms": 1755100002000 }
+```
+
+- `reason` and `context` are the robot's `help.request` payload, verbatim. `context` is
+  omitted when the robot sent none.
+- `requested_at_ms` is epoch milliseconds on the **server's** clock at the moment the
+  robot entered the queue. Order the queue by it, oldest first.
+- `help` is absent in every other state (`AUTONOMOUS`, `TELEOP`).
+
+The same object arrives live, so a subscriber never needs a fresh snapshot to build or
+order the queue:
+
+| message | where | when |
+|---|---|---|
+| `event` `robot.help_requested` | `data` is the help object | the robot raised its hand |
+| `event` `robot.lease_revoked` | `data.help` | the revocation put the robot back in the queue (`expired`, `operator_lost`) |
+| `lease.revoked` (to robot and operator) | `help` | same |
+
+A robot that returns to the queue after a claim (lease expiry, operator loss) keeps its
+**original** `reason`, `context` and `requested_at_ms`, so it sorts ahead of robots that
+asked later. Handback (`lease.release`) closes the entry; the next `help.request` opens a
+new one with a new time. A steal (`reason: "stolen"`) leaves the robot in `TELEOP` and
+carries no `help`.
+
+If the robot never asked (an operator claimed it proactively and then lost it), the
+server opens the entry itself: `reason` is the revocation reason (`expired` or
+`operator_lost`), there is no `context`, and `requested_at_ms` is the time of the
+revocation.
+
+The server rejects a `help.request` whose `reason` is empty or longer than 256 characters
+with `invalid_message`.
+
 ## Acked send (convention on channel data)
 
 `channel.publish` is at-most-once and a successful publish gets no reply. **Acked send**
