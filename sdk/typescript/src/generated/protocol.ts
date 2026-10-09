@@ -30,6 +30,8 @@ export interface WelcomePayload {
   kind: ClientKind;
   server_time_ms: number;
   heartbeat_interval_ms: number;
+  /** To a robot only: the lease the server holds for it as this connection begins, or null when it holds none. A robot replaces whatever it believed with this. Absent for operators and services, and from a server that predates the field: a robot then holds no lease. */
+  lease?: Lease | null;
 }
 
 /** Source: `protocol/schemas/auth.schema.json#/$defs/heartbeat` */

@@ -572,9 +572,12 @@ The SDK adds nothing to the wire. A robot in another language speaks §2 directl
 `enroll.request` once on a throwaway socket and keep the token; then on every connect
 `hello` → `welcome`, `manifest`, a `heartbeat` every `welcome.heartbeat_interval_ms`,
 `telemetry` as it likes, and `help.request` to raise its hand. It obeys `twist` only while
-`lease_id` matches the last `lease.granted` for it, zeroes velocity ~300 ms after the last
-valid twist and immediately on `lease.revoked` or a dropped socket, and reconnects with
-backoff using the same token. `sdk/python/fleet/robot.py` and `client.py` are a readable
+`lease_id` matches the lease it holds: the last `lease.granted` for it on this connection,
+or the `lease` its `welcome` stated. Every `welcome` replaces what the robot believed: a
+`lease` of `null`, or none in the welcome at all, means it holds nothing, whatever it held
+before the socket dropped (`protocol/README.md`, "A robot's lease at connect"). It zeroes
+velocity ~300 ms after the last valid twist and immediately on `lease.revoked` or a
+dropped socket, and reconnects with backoff using the same token. `sdk/python/fleet/robot.py` and `client.py` are a readable
 reference implementation (about 1,000 lines together, mostly comments and edge cases); the schemas in `protocol/schemas/`
 and `TestIntegrationStoryline` (§9) are the authority.
 

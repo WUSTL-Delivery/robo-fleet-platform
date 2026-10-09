@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -206,5 +207,59 @@ func TestCatalogCoversAllFixtureTypes(t *testing.T) {
 		if _, ok := payloadFactories[typ]; !ok {
 			t.Errorf("catalog type %q has no Go struct registered", typ)
 		}
+	}
+}
+
+// TestWelcomeLeaseKeepsItsThreeCases: an absent lease, a null lease and a lease
+// are three different statements to a robot. The Go struct must read each one
+// as what it is and write it back unchanged.
+func TestWelcomeLeaseKeepsItsThreeCases(t *testing.T) {
+	cases := []struct {
+		fixture string
+		stated  bool
+		leaseID string
+	}{
+		{"welcome.json", false, ""},
+		{"welcome-robot-no-lease.json", true, ""},
+		{"welcome-robot-lease.json", true, "ls_7f8e9d0c"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.fixture, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join(protocolDir(t), "fixtures", "valid", tc.fixture))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var env protocol.Envelope
+			if err := json.Unmarshal(raw, &env); err != nil {
+				t.Fatal(err)
+			}
+			var w protocol.Welcome
+			if err := json.Unmarshal(env.Payload, &w); err != nil {
+				t.Fatal(err)
+			}
+			got := ""
+			if w.Lease.Lease != nil {
+				got = w.Lease.Lease.LeaseID
+			}
+			if w.Lease.Stated != tc.stated || got != tc.leaseID {
+				t.Fatalf("read lease as stated=%v id=%q, want stated=%v id=%q", w.Lease.Stated, got, tc.stated, tc.leaseID)
+			}
+			out, err := json.Marshal(w)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var before, after map[string]any
+			if err := json.Unmarshal(env.Payload, &before); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(out, &after); err != nil {
+				t.Fatal(err)
+			}
+			_, hadLease := before["lease"]
+			_, hasLease := after["lease"]
+			if hadLease != hasLease || !reflect.DeepEqual(before, after) {
+				t.Fatalf("welcome changed on the way through the Go struct:\n in: %s\nout: %s", env.Payload, out)
+			}
+		})
 	}
 }

@@ -128,6 +128,43 @@ type Welcome struct {
 	Kind                string `json:"kind"`
 	ServerTimeMs        int64  `json:"server_time_ms"`
 	HeartbeatIntervalMs int    `json:"heartbeat_interval_ms"`
+	// Lease is stated to a robot on every connect: the lease the server holds
+	// for it, or none. Unstated (the zero value) for operators and services.
+	Lease LeaseAtConnect `json:"lease,omitzero"`
+}
+
+// LeaseAtConnect is welcome.lease. The wire has three cases and they mean
+// different things to a robot, so the type keeps them apart:
+//
+//	member absent  -> Stated false            (not a robot, or an older server)
+//	"lease": null  -> Stated true, Lease nil  (the server holds no lease for it)
+//	"lease": {...} -> Stated true, Lease set  (the lease it holds)
+type LeaseAtConnect struct {
+	Stated bool
+	Lease  *Lease
+}
+
+// HoldsLease states the lease a connecting robot holds; nil states none.
+func HoldsLease(l *Lease) LeaseAtConnect { return LeaseAtConnect{Stated: true, Lease: l} }
+
+// IsZero keeps an unstated lease off the wire (the field is omitzero).
+func (s LeaseAtConnect) IsZero() bool { return !s.Stated }
+
+func (s LeaseAtConnect) MarshalJSON() ([]byte, error) {
+	if s.Lease == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(s.Lease)
+}
+
+// UnmarshalJSON runs only when the member is present, null included.
+func (s *LeaseAtConnect) UnmarshalJSON(data []byte) error {
+	*s = LeaseAtConnect{Stated: true}
+	if string(data) == "null" {
+		return nil
+	}
+	s.Lease = new(Lease)
+	return json.Unmarshal(data, s.Lease)
 }
 
 type Heartbeat struct{}

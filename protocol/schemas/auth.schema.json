@@ -44,7 +44,14 @@
         "fleet_id": { "type": "string", "minLength": 1 },
         "kind": { "$ref": "defs.schema.json#/$defs/clientKind" },
         "server_time_ms": { "type": "integer" },
-        "heartbeat_interval_ms": { "type": "integer", "exclusiveMinimum": 0 }
+        "heartbeat_interval_ms": { "type": "integer", "exclusiveMinimum": 0 },
+        "lease": {
+          "description": "To a robot only: the lease the server holds for it as this connection begins, or null when it holds none. A robot replaces whatever it believed with this. Absent for operators and services, and from a server that predates the field: a robot then holds no lease.",
+          "oneOf": [
+            { "$ref": "defs.schema.json#/$defs/lease" },
+            { "type": "null" }
+          ]
+        }
       },
       "required": ["client_id", "fleet_id", "kind", "server_time_ms", "heartbeat_interval_ms"],
       "additionalProperties": false
