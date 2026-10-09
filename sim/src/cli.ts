@@ -14,6 +14,7 @@ Usage: npm run sim -- [options]
   --omni <n>             how many are holonomic (honor linear.y); the rest are diff-drive
                                                         (default count/5, rounded down)
   --no-drive             manifests declare no drive block (robots cannot be driven)
+  --no-p2p               never answer a WebRTC offer: twist stays on the server bus
   --origin <lat,lon>     centre of the fleet            (default ${DEFAULT_ORIGIN.lat},${DEFAULT_ORIGIN.lon})
   --spread <m>           radius the robots start within (default 120)
   --frame <f>            pose frame: geographic | local (default geographic)
@@ -24,6 +25,8 @@ Usage: npm run sim -- [options]
   --ephemeral            keep tokens in memory: new identities every run
   --name-prefix <p>      robot name prefix             (default sim)
   -h, --help             show this help
+
+Send SIGUSR2 to drop every robot's WebRTC peer (to watch a console fall back to the bus).
 
 Robots enroll once with the fleet enrollment key and keep their token in
 --state-dir, so a restarted sim reuses the same robot identities.`;
@@ -46,6 +49,7 @@ const options = {
   count: { type: "string" },
   omni: { type: "string" },
   "no-drive": { type: "boolean" },
+  "no-p2p": { type: "boolean" },
   origin: { type: "string" },
   spread: { type: "string" },
   frame: { type: "string" },
@@ -99,6 +103,7 @@ try {
     count,
     ...(omni !== undefined ? { omni } : {}),
     drive: !values["no-drive"],
+    p2p: !values["no-p2p"],
     frame,
     origin,
     spreadM: num("spread", values.spread, 120),
@@ -132,5 +137,11 @@ const shutdown = () => {
   log("stopped");
   process.exit(0);
 };
+// For showing the fallback: `kill -USR2 <pid>` drops every robot's WebRTC peer
+// as a dead link would. Leases are untouched; consoles fall back to the bus.
+process.on("SIGUSR2", () => {
+  log("SIGUSR2: dropping WebRTC peers");
+  for (const r of fleet.robots) r.dropPeer();
+});
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

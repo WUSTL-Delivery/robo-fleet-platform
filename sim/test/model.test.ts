@@ -1,6 +1,8 @@
 // Pure motion model and the robot-side lease gate + deadman, with an injected clock.
 import { describe, expect, it } from "vitest";
 import { fromGeo, integrate, normalizeAngle, realize, spread, toGeo } from "../src/kinematics.js";
+import { readFileSync } from "node:fs";
+import { parseTwist } from "../src/p2p.js";
 import { DEADMAN_MS, TeleopGate } from "../src/teleop.js";
 
 const LIM = { maxV: 1.5, maxW: 2 };
@@ -109,5 +111,47 @@ describe("TeleopGate", () => {
     expect(g.current(1)).toEqual({ vx: 0, vy: 0, wz: 0 });
     expect(g.leaseId).toBe("ls_a");
     expect(g.accept("ls_a", fwd, 2)).toBe(true);
+  });
+
+  it("ignores a bus twist while a data-channel twist is fresh, and takes it once the window has passed", () => {
+    const g = new TeleopGate();
+    const back = { vx: -1, vy: 0, wz: 0 };
+    g.grant("ls_a");
+    expect(g.accept("ls_a", fwd, 1000, "p2p")).toBe(true);
+    expect(g.accept("ls_a", back, 1000 + DEADMAN_MS, "bus")).toBe(false); // a straggler from before the switch
+    expect(g.current(1000 + DEADMAN_MS)).toEqual(fwd);
+    expect(g.accept("ls_a", back, 1000 + DEADMAN_MS + 1, "bus")).toBe(true); // the fallback takes over
+    expect(g.current(1000 + DEADMAN_MS + 2)).toEqual(back);
+    // The data channel is never shadowed by the bus.
+    expect(g.accept("ls_a", fwd, 1000 + DEADMAN_MS + 3, "p2p")).toBe(true);
+    // A wrong-lease twist on the channel does not start the window.
+    g.grant("ls_b");
+    expect(g.accept("ls_a", fwd, 5000, "p2p")).toBe(false);
+    expect(g.accept("ls_b", back, 5001, "bus")).toBe(true);
+  });
+});
+
+describe("data-channel twist", () => {
+  const fixture = (name: string) =>
+    JSON.parse(readFileSync(new URL(`../../protocol/fixtures/datachannel/${name}.json`, import.meta.url), "utf8")) as Record<string, unknown>;
+
+  it("reads the golden fixture as the bus twist payload plus seq", () => {
+    expect(parseTwist(fixture("twist"))).toEqual({
+      seq: 42,
+      payload: { lease_id: "ls_7f8e9d0c", linear: { x_mps: 0.5 }, angular: { z_radps: -0.3 } },
+    });
+  });
+
+  it("refuses anything that is not a whole twist", () => {
+    const good = fixture("twist");
+    expect(parseTwist(fixture("ping"))).toBeUndefined();
+    expect(parseTwist({ ...good, seq: undefined })).toBeUndefined();
+    expect(parseTwist({ ...good, seq: 0 })).toBeUndefined();
+    expect(parseTwist({ ...good, seq: 1.5 })).toBeUndefined();
+    expect(parseTwist({ ...good, lease_id: "" })).toBeUndefined();
+    expect(parseTwist({ ...good, linear: { x_mps: "0.5" } })).toBeUndefined();
+    expect(parseTwist({ ...good, linear: { x_mps: 0.5, y_mps: null } })).toBeUndefined();
+    expect(parseTwist({ ...good, angular: {} })).toBeUndefined();
+    expect(parseTwist({ ...good, linear: { x_mps: 0.1, y_mps: 0.2 } })?.payload.linear).toEqual({ x_mps: 0.1, y_mps: 0.2 });
   });
 });

@@ -5,7 +5,9 @@
 // On every (re)connect it declares its manifest. It then sends telemetry at
 // `telemetryHz` with a pose integrated from the twist it last accepted, obeys
 // twist only under its current lease, and zeroes velocity DEADMAN_MS after the
-// last valid twist. Optionally it wanders while autonomous and raises
+// last valid twist. Twist arrives over the bus or, once the operator holding
+// the lease has connected to it, over a WebRTC data channel (p2p.ts); the same
+// lease gate and deadman judge both. Optionally it wanders while autonomous and raises
 // help.request at random.
 
 import {
@@ -14,6 +16,7 @@ import {
   type Manifest,
   type Pose,
   type TelemetryPayload,
+  type TwistPayload,
   type TokenStore,
   type WebSocketConstructor,
   type WelcomePayload,
@@ -29,7 +32,8 @@ import {
   type Pose2D,
   type Velocity,
 } from "./kinematics.js";
-import { DEADMAN_MS, TeleopGate } from "./teleop.js";
+import { TwistAnswerer } from "./p2p.js";
+import { DEADMAN_MS, TeleopGate, type TwistVia } from "./teleop.js";
 
 /** Where the robot reports its pose: lat/lon around an origin, or a local Cartesian frame (D7). */
 export type PoseFrame = { kind: "geographic"; origin: GeoPoint } | { kind: "local"; frameId: string };
@@ -57,6 +61,10 @@ export interface SimRobotOptions {
   /** Drive slow random curves while autonomous. */
   wander?: boolean;
   deadmanMs?: number;
+  /** false: never answer a WebRTC offer, so twist stays on the bus. Default true. */
+  p2p?: boolean;
+  /** STUN/TURN servers for the data channel. None are needed on loopback or one LAN. */
+  iceServers?: { urls: string | string[]; username?: string; credential?: string }[];
   random?: () => number;
   log?: (line: string) => void;
 }
@@ -69,6 +77,9 @@ export class SimRobot {
   readonly #o: SimRobotOptions;
   readonly #gate: TeleopGate;
   readonly #rand: () => number;
+  readonly #peer: TwistAnswerer | undefined;
+  #accepted: Record<TwistVia, number> = { bus: 0, p2p: 0 };
+  #lastVia: TwistVia | undefined;
   #client: FleetClient;
   #pose: Pose2D;
   #vel: Velocity = STOPPED;
@@ -89,6 +100,14 @@ export class SimRobot {
     this.#pose = { ...opts.start };
     this.#battery = 60 + this.#rand() * 40;
     this.#client = this.#makeClient();
+    if (opts.p2p !== false && opts.drive) {
+      this.#peer = new TwistAnswerer({
+        client: () => this.#client,
+        ...(opts.iceServers ? { iceServers: opts.iceServers } : {}),
+        onTwist: (twist) => this.#onTwist(twist, "p2p"),
+        log: (line) => this.#log(line),
+      });
+    }
   }
 
   get client(): FleetClient {
@@ -108,6 +127,22 @@ export class SimRobot {
   }
   get leaseId(): string | undefined {
     return this.#gate.leaseId;
+  }
+  /** Twists obeyed so far, by the transport they arrived on. */
+  get twistsAccepted(): Readonly<Record<TwistVia, number>> {
+    return { ...this.#accepted };
+  }
+  /** The transport of the last twist obeyed under the current lease. */
+  get twistVia(): TwistVia | undefined {
+    return this.#lastVia;
+  }
+  /** Whether the operator's twist data channel is open. */
+  get peerOpen(): boolean {
+    return this.#peer?.open ?? false;
+  }
+  /** Drops the WebRTC peer as a dead link would, keeping the lease. */
+  dropPeer(): void {
+    this.#peer?.closePeer();
   }
 
   /**
@@ -135,6 +170,7 @@ export class SimRobot {
     this.#stopped = true;
     clearInterval(this.#physics);
     clearInterval(this.#telemetry);
+    this.#peer?.revoke();
     this.#client.close();
   }
 
@@ -165,7 +201,12 @@ export class SimRobot {
       pose: this.wirePose(),
       velocity: { v_mps: round(Math.sign(v.vx || 1) * Math.hypot(v.vx, v.vy), 3), w_radps: round(v.wz, 3) },
       battery: { pct: round(this.#battery, 1) },
-      health: { sim: true, morphology: this.morphology, mode: this.#mode },
+      health: {
+        sim: true,
+        morphology: this.morphology,
+        mode: this.#mode,
+        ...(this.#mode === "teleop" && this.#lastVia ? { twist_via: this.#lastVia } : {}),
+      },
     };
   }
 
@@ -196,25 +237,41 @@ export class SimRobot {
 
     client.on("lease.granted", ({ payload }) => {
       if (payload.robot_id !== client.clientId) return;
+      const renewal = payload.lease_id === this.#gate.leaseId;
+      this.#peer?.grant(payload.lease_id, payload.operator_id);
+      if (renewal) return; // same lease, later expiry: nothing to reset
       this.#gate.grant(payload.lease_id);
+      this.#lastVia = undefined;
       this.#mode = "teleop";
       this.#log(`lease granted to ${payload.operator_id}`);
     });
 
     client.on("lease.revoked", ({ payload }) => {
       if (!this.#gate.revoke(payload.lease_id)) return;
+      this.#peer?.revoke(); // cleanup: the lease is already gone
+      this.#lastVia = undefined;
       // Handback resumes autonomy; expiry / operator loss put the robot back in the queue.
       this.#mode = payload.reason === "released" ? "autonomous" : "help";
       this.#log(`lease revoked (${payload.reason})`);
     });
 
-    client.on("twist", ({ payload }) => {
-      if (!o.drive) return; // declared no drive: nothing to obey
-      const cmd = { vx: payload.linear.x_mps, vy: payload.linear.y_mps ?? 0, wz: payload.angular.z_radps };
-      this.#gate.accept(payload.lease_id, cmd, Date.now());
-    });
+    client.on("twist", ({ payload }) => void this.#onTwist(payload, "bus"));
+    client.on("signal", ({ payload }) => this.#peer?.onSignal(payload));
 
     return client;
+  }
+
+  /** One twist from either transport, judged by the same gate. */
+  #onTwist(payload: TwistPayload, via: TwistVia): boolean {
+    if (!this.#o.drive) return false; // declared no drive: nothing to obey
+    // The data channel outlives a control-link blip, but a robot that cannot
+    // hear a revocation must not be driven: fail closed until it is back.
+    if (via === "p2p" && this.#client.state !== "open") return false;
+    const cmd = { vx: payload.linear.x_mps, vy: payload.linear.y_mps ?? 0, wz: payload.angular.z_radps };
+    if (!this.#gate.accept(payload.lease_id, cmd, Date.now(), via)) return false;
+    this.#accepted[via] += 1;
+    this.#lastVia = via;
+    return true;
   }
 
   #startLoops(): void {

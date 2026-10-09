@@ -5,16 +5,26 @@
 // - Deadman: ~300 ms without a valid twist → zero velocity. The robot fails
 //   closed on its own; it never waits for the server to say the operator left.
 // - Losing the lease or the link zeroes velocity immediately.
+// - Twist can arrive two ways: over the control-plane bus, or over the direct
+//   WebRTC data channel ("p2p"). The operator sends each twist on one of them.
+//   A bus twist is ignored while a data-channel twist was accepted within the
+//   deadman window, so a bus twist still in flight when the operator switched
+//   to the faster path cannot overwrite a newer setpoint (protocol/README.md,
+//   "Teleop data plane").
 
 import { STOPPED, type Velocity } from "./kinematics.js";
 
 export const DEADMAN_MS = 300;
+
+/** How a twist reached the robot. */
+export type TwistVia = "bus" | "p2p";
 
 export class TeleopGate {
   readonly deadmanMs: number;
   #leaseId: string | undefined;
   #cmd: Velocity = STOPPED;
   #cmdAtMs = Number.NEGATIVE_INFINITY;
+  #p2pAtMs = Number.NEGATIVE_INFINITY;
 
   constructor(deadmanMs = DEADMAN_MS) {
     this.deadmanMs = deadmanMs;
@@ -49,9 +59,14 @@ export class TeleopGate {
     this.#halt();
   }
 
-  /** Offers a twist; returns whether it was accepted (it bears the current lease). */
-  accept(leaseId: string, cmd: Velocity, nowMs: number): boolean {
+  /**
+   * Offers a twist; returns whether it was accepted: it bears the current
+   * lease and, on the bus, is not shadowed by a fresh data-channel twist.
+   */
+  accept(leaseId: string, cmd: Velocity, nowMs: number, via: TwistVia = "bus"): boolean {
     if (this.#leaseId === undefined || leaseId !== this.#leaseId) return false;
+    if (via === "p2p") this.#p2pAtMs = nowMs;
+    else if (nowMs - this.#p2pAtMs <= this.deadmanMs) return false;
     this.#cmd = cmd;
     this.#cmdAtMs = nowMs;
     return true;
@@ -67,5 +82,6 @@ export class TeleopGate {
   #halt(): void {
     this.#cmd = STOPPED;
     this.#cmdAtMs = Number.NEGATIVE_INFINITY;
+    this.#p2pAtMs = Number.NEGATIVE_INFINITY;
   }
 }

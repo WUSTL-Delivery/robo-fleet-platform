@@ -16,6 +16,7 @@
   "dependencies": {
     "@fleet-platform/sdk": "file:../sdk/typescript",
     "tsx": "^4.23.15",
+    "werift": "^0.25.0",
     "ws": "^8.21.3"
   },
   "devDependencies": {
