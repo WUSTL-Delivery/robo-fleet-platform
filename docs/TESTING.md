@@ -87,6 +87,12 @@ from `TestMain`), starts a fresh one per test (`fleettest.Start`), and offers a 
 packages; it builds the binary. `GOTOOLCHAIN=go1.24.0 go test ./...` holds the SDK's Go
 floor: the helper still builds the server with a newer `go` from `PATH`.
 
+One Go test crosses languages: `TestSendAckedToThePythonRobot` runs
+`sdk/python/examples/fake_robot.py` and sends it an acked message from the Go client, so
+the Go sender and the Python receiver of the acked-send convention are checked against
+each other. It skips unless a Python that has the Python SDK's dependencies is available:
+`FLEET_TEST_PYTHON=/path/to/venv/bin/python go test ./fleet`.
+
 Robot-specific timing tests live with `sdk/ros2` later: deadman fires at ~300ms without
 valid twist (fake clock), twist rejected without current lease id.
 

@@ -5,6 +5,7 @@ package fleet
 //
 //	client.OnSnapshot(world.Reset)      every snapshot, including after a reconnect
 //	client.OnPresence(world.SetOnline)  robot.online / robot.offline
+//	client.OnOperatorPresence(world.SetOperator)  operator.online / operator.offline
 //	client.OnLease(world.ApplyLease)    robot.lease_granted / _released / _revoked
 //	client.OnHelp(world.Enqueue)        a robot entered the intervention queue
 //	client.OnTelemetry(world.SetPose)   robot.telemetry
@@ -49,7 +50,8 @@ import (
 
 // Topics for Subscribe.
 const (
-	// TopicPresence: robot.online and robot.offline.
+	// TopicPresence: robot.online and robot.offline, operator.online and
+	// operator.offline.
 	TopicPresence = "presence"
 	// TopicEvents: robot.help_requested and the robot.lease_* events.
 	TopicEvents = "events"
@@ -70,10 +72,13 @@ func ChannelTopic(channel string) string { return "channel:" + channel }
 type (
 	Snapshot     = protocol.Snapshot
 	RobotSummary = protocol.RobotSummary
-	Event        = protocol.Event
-	Telemetry    = protocol.Telemetry
-	Lease        = protocol.Lease
-	HelpDetails  = protocol.HelpDetails
+	// OperatorSummary is one operator of the fleet: an entry of
+	// Snapshot.Operators, and what OnOperatorPresence handlers get.
+	OperatorSummary = protocol.OperatorSummary
+	Event           = protocol.Event
+	Telemetry       = protocol.Telemetry
+	Lease           = protocol.Lease
+	HelpDetails     = protocol.HelpDetails
 )
 
 // LeaseChange is one robot.lease_granted, robot.lease_released or
@@ -132,13 +137,33 @@ func (c *Client) Subscribe(ctx context.Context, topics ...string) (Snapshot, err
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
 	}
+	call := c.startSubscribe(topics, false)
+	if call == nil {
+		return Snapshot{}, c.Err()
+	}
+	select {
+	case <-call.done:
+		return call.snap, call.err
+	case <-ctx.Done():
+		return Snapshot{}, ctx.Err()
+	case <-c.ctx.Done():
+		return Snapshot{}, c.Err()
+	}
+}
+
+// startSubscribe remembers topics and, if a session is open, writes the
+// subscribe for them; otherwise the next session's subscribe covers them. The
+// returned call finishes with the snapshot that answers it. It returns nil if
+// the client is closed, and also, with onlyNew, if every topic was subscribed
+// already (nothing is sent then).
+func (c *Client) startSubscribe(topics []string, onlyNew bool) *subCall {
 	call := &subCall{done: make(chan struct{})}
 	s := &c.stream
 
 	s.send.Lock()
+	defer s.send.Unlock()
 	if c.ctx.Err() != nil {
-		s.send.Unlock()
-		return Snapshot{}, c.Err()
+		return nil
 	}
 	s.mu.Lock()
 	for _, t := range topics {
@@ -146,6 +171,10 @@ func (c *Client) Subscribe(ctx context.Context, topics ...string) (Snapshot, err
 			s.topics = append(s.topics, t)
 			call.added = append(call.added, t)
 		}
+	}
+	if onlyNew && len(call.added) == 0 {
+		s.mu.Unlock()
+		return nil
 	}
 	conn := s.conn
 	id := ""
@@ -159,16 +188,7 @@ func (c *Client) Subscribe(ctx context.Context, topics ...string) (Snapshot, err
 	if conn != nil {
 		c.writeSubscribe(conn, id, topics)
 	}
-	s.send.Unlock()
-
-	select {
-	case <-call.done:
-		return call.snap, call.err
-	case <-ctx.Done():
-		return Snapshot{}, ctx.Err()
-	case <-c.ctx.Done():
-		return Snapshot{}, c.Err()
-	}
+	return call
 }
 
 // OnSnapshot registers a handler for every snapshot: the answer to each
@@ -189,6 +209,16 @@ func (c *Client) OnEvent(handler func(Event)) (remove func()) {
 // robot.offline (topic TopicPresence). The returned function removes it.
 func (c *Client) OnPresence(handler func(robotID string, online bool)) (remove func()) {
 	return addHandler(c, &c.stream.onPresence, func(a robotArg[bool]) { handler(a.robotID, a.v) })
+}
+
+// OnOperatorPresence registers a handler for operator.online and
+// operator.offline (topic TopicPresence). It gets the operator's entry as of
+// the event, exactly as a snapshot taken then would list it in
+// Snapshot.Operators, with Online false when the operator went offline: upsert
+// it by OperatorID. An operator does not get its own operator.online; it finds
+// itself in its snapshot. The returned function removes the handler.
+func (c *Client) OnOperatorPresence(handler func(OperatorSummary)) (remove func()) {
+	return addHandler(c, &c.stream.onOperator, handler)
 }
 
 // OnLease registers a handler for the robot.lease_* events (topic
@@ -237,6 +267,7 @@ type stream struct {
 	onSnapshot  []entry[Snapshot]
 	onEvent     []entry[Event]
 	onPresence  []entry[robotArg[bool]]
+	onOperator  []entry[OperatorSummary]
 	onLease     []entry[LeaseChange]
 	onHelp      []entry[robotArg[HelpDetails]]
 	onTelemetry []entry[robotArg[Telemetry]]
@@ -409,6 +440,7 @@ func (c *Client) dispatchStream(env protocol.Envelope) {
 	c.mu.Lock()
 	onSnapshot, onEvent := s.onSnapshot, s.onEvent
 	onPresence, onLease, onHelp, onTelemetry := s.onPresence, s.onLease, s.onHelp, s.onTelemetry
+	onOperator := s.onOperator
 	c.mu.Unlock()
 
 	if env.Type == protocol.TypeSnapshot {
@@ -430,6 +462,14 @@ func (c *Client) dispatchStream(env protocol.Envelope) {
 	switch ev.Event {
 	case protocol.EventRobotOnline, protocol.EventRobotOffline:
 		call(onPresence, robotArg[bool]{ev.RobotID, ev.Event == protocol.EventRobotOnline})
+
+	case protocol.EventOperatorOnline, protocol.EventOperatorOffline:
+		// The entry in data is the whole truth; the event name only repeats
+		// its online flag. Without a usable entry there is nothing to upsert.
+		var op OperatorSummary
+		if json.Unmarshal(ev.Data, &op) == nil && op.OperatorID != "" {
+			call(onOperator, op)
+		}
 
 	case protocol.EventRobotTelemetry:
 		var t Telemetry

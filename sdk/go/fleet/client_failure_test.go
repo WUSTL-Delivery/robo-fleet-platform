@@ -2,6 +2,7 @@ package fleet_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"fleetplatform/sdk/go/fleet"
 	"fleetplatform/sdk/go/internal/fleettest"
+	"fleetplatform/sdk/go/protocol"
 )
 
 // Terminal vs retryable failures (docs/INTEGRATION.md 2.2, 2.3, 2.8).
@@ -250,4 +252,66 @@ func TestUnsavableTokenIsTerminalAfterOneEnrollment(t *testing.T) {
 	if n := len(srv.Clients(t)); n != 1 {
 		t.Fatalf("server has %d clients, want exactly the 1 enrollment", n)
 	}
+}
+
+// A refused lease.claim is a conflict too, but it is a reply: the connection
+// stays open. If the socket then drops with nothing in between, that conflict
+// is the last frame the client read, and it must not be taken for the
+// "another connection took over" notice that ends a client for good.
+func TestRefusedClaimIsNotATerminalConflict(t *testing.T) {
+	srv := fleettest.Start(t)
+	proxy := srv.Proxy(t)
+	robot := mustConnect(t, fleet.Config{URL: srv.WSURL, Kind: fleet.Robot, EnrollKey: srv.EnrollKey})
+	if err := robot.Send(context.Background(), protocol.TypeManifest, protocol.Manifest{
+		Drive: &protocol.Drive{Type: "twist", MaxVMps: 1, MaxWRadps: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	holder := mustConnect(t, fleet.Config{URL: srv.WSURL, Kind: fleet.Operator, Name: "holder", EnrollKey: srv.OperatorInvite(t)})
+	granted := make(chan struct{}, 1)
+	holder.On(protocol.TypeLeaseGranted, func(protocol.Envelope) { granted <- struct{}{} })
+	claim := protocol.LeaseClaim{RobotID: robot.ClientID()}
+	if err := holder.Send(context.Background(), protocol.TypeLeaseClaim, claim); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-granted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first operator got no lease")
+	}
+
+	st := newStates()
+	second := mustConnect(t, fleet.Config{
+		URL: proxy.WSURL, Kind: fleet.Operator, Name: "second", EnrollKey: srv.OperatorInvite(t), OnState: st.record,
+	})
+	refused := make(chan protocol.ErrorMsg, 1)
+	second.On(protocol.TypeError, func(env protocol.Envelope) {
+		var msg protocol.ErrorMsg
+		json.Unmarshal(env.Payload, &msg)
+		refused <- msg
+	})
+	// No id on the claim: the refusal then has no ref, and only the lease it
+	// names tells it apart from the closing notice.
+	if err := second.Send(context.Background(), protocol.TypeLeaseClaim, claim); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case msg := <-refused:
+		if msg.Code != protocol.ErrConflict || msg.Lease == nil || msg.Lease.OperatorID != holder.ClientID() || msg.Ref != "" {
+			t.Fatalf("refusal: %+v", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second claim got no answer")
+	}
+
+	cut := len(st.list())
+	proxy.Drop()
+	lost, i := st.waitFor(t, cut, "the drop to be noticed", func(ch fleet.StateChange) bool {
+		return ch.State == fleet.StateReconnecting || ch.State == fleet.StateClosed
+	})
+	if lost.State != fleet.StateReconnecting || !errors.Is(lost.Err, fleet.ErrNetwork) {
+		t.Fatalf("after a refused claim and a drop: %s (%v), want reconnecting after a network error", lost.State, lost.Err)
+	}
+	st.waitFor(t, i, "open again", isState(fleet.StateOpen))
 }

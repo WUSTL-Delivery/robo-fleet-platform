@@ -22,7 +22,10 @@
 //	client.State / Welcome / ClientID / FleetID / Done / Err
 //
 // subscribe.go adds snapshot-then-stream on top: Subscribe and the typed
-// OnSnapshot / OnPresence / OnLease / OnHelp / OnTelemetry / OnEvent callbacks.
+// OnSnapshot / OnPresence / OnOperatorPresence / OnLease / OnHelp / OnTelemetry
+// / OnEvent callbacks. channel.go and acked.go add domain channels:
+// client.Channel(name) with Publish, Broadcast, OnMessage, and the acked-send
+// convention (SendAcked, OnAcked).
 //
 // # Reconnect policy
 //
@@ -163,6 +166,10 @@ type Config struct {
 	// HandshakeTimeout bounds dialing plus the wait for enroll.response or
 	// welcome on one attempt. Default 10s.
 	HandshakeTimeout time.Duration
+	// AckedResend is the interval between re-sends of a Channel.SendAcked that
+	// has not been acked yet. Default DefaultAckedResend (1s); values outside
+	// the 250ms to 5s the convention allows are pulled to the nearest bound.
+	AckedResend time.Duration
 	// OnState, when set, is registered before the first attempt, so it sees
 	// every transition from the start. A handler added with Client.OnState
 	// after Connect returns has already missed the first StateOpen.
@@ -203,6 +210,9 @@ type Client struct {
 
 	// stream is the snapshot-then-stream layer (subscribe.go).
 	stream stream
+	// channels is the channel layer, acked sends included (channel.go, acked.go).
+	channels    channels
+	ackedResend time.Duration
 
 	// queue feeds the delivery goroutine. Only the connection goroutine sends on
 	// it (through deliver) and only that goroutine closes it.
@@ -291,6 +301,11 @@ func newClient(cfg Config) (*Client, error) {
 		opened:  make(chan struct{}),
 		done:    make(chan struct{}),
 	}
+	c.ackedResend = min(max(cfg.AckedResend, minAckedResend), maxAckedResend)
+	if cfg.AckedResend <= 0 {
+		c.ackedResend = DefaultAckedResend
+	}
+	c.channels.seq.seed(time.Now())
 	if cfg.OnState != nil {
 		c.OnState(cfg.OnState)
 	}
@@ -639,8 +654,10 @@ func (c *Client) session(token string) (welcomed bool, _ *Error) {
 	// the socket, with three exceptions the server sends as the LAST frame
 	// before it closes: conflict (taken over), rate_limited (heartbeat lapsed),
 	// auth_failed (token revoked). The same codes also arrive as ordinary
-	// replies (a refused lease.claim, a throttled publish), so one counts as the
-	// reason only if nothing came after it.
+	// replies (a refused lease.claim is a conflict, a throttled publish is
+	// rate_limited). A reply names the message it answers (ref) or, for the
+	// refused claim, the lease in the way; the closing notice has neither. So
+	// one counts as the reason only if it has neither and nothing came after it.
 	var closing *Error
 	for {
 		env, ok, err := readEnvelope(c.ctx, conn)
@@ -659,12 +676,24 @@ func (c *Client) session(token string) (welcomed bool, _ *Error) {
 		}
 		closing = nil
 		if env.Type == protocol.TypeError {
-			if e := serverError("", env); e.Code == protocol.ErrConflict || e.Code == protocol.ErrRateLimited || e.Code == protocol.ErrAuthFailed {
-				closing = e
-			}
+			closing = closingNotice(env)
 		}
 		c.route(env)
 	}
+}
+
+// closingNotice returns the reason an error envelope gives for the close that
+// follows it, or nil if the envelope is a reply to something this client sent.
+func closingNotice(env protocol.Envelope) *Error {
+	var msg protocol.ErrorMsg
+	if json.Unmarshal(env.Payload, &msg) != nil || msg.Ref != "" || msg.Lease != nil {
+		return nil
+	}
+	switch msg.Code {
+	case protocol.ErrConflict, protocol.ErrRateLimited, protocol.ErrAuthFailed:
+		return &Error{Code: msg.Code, Message: msg.Message}
+	}
+	return nil
 }
 
 // sessionOpened runs on the connection goroutine the moment a welcome arrives,
@@ -688,6 +717,10 @@ func (c *Client) sessionOpened(conn *websocket.Conn, welcome *protocol.Welcome) 
 
 	w := *welcome
 	c.setState(StateChange{State: StateOpen, Welcome: &w})
+	// After the state change, because it wakes callers that Send at once.
+	// Nothing matches it in sessionLost: a pending acked send notices the loss
+	// by its next write failing, and then waits for this.
+	c.channels.opened()
 	c.openedOne.Do(func() { close(c.opened) })
 	return true
 }
@@ -712,6 +745,7 @@ func (c *Client) sessionLost() {
 // that only needs to see envelopes as the handlers do, in that gated order,
 // belongs in dispatch instead.
 func (c *Client) route(env protocol.Envelope) {
+	c.observeAcked(env) // answers to SendAcked; see there for why not in dispatch
 	for _, e := range c.stream.gate(env) {
 		c.deliver(func() { c.dispatch(e) })
 	}
@@ -753,6 +787,7 @@ func (c *Client) dispatch(env protocol.Envelope) {
 	}
 	// Typed layers, after the raw handlers.
 	c.dispatchStream(env)
+	c.dispatchChannels(env)
 }
 
 // notifyState calls the state handlers; delivery goroutine only.
