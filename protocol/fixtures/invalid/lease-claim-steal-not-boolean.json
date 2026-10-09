@@ -1,0 +1,5 @@
+{
+  "v": 0,
+  "type": "lease.claim",
+  "payload": { "robot_id": "r_1a2b3c4d", "steal": "yes" }
+}

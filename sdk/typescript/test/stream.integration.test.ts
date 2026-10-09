@@ -332,4 +332,49 @@ describe("subscribe, events and channels against fleet-server", () => {
     robot.send("telemetry", { battery: { pct: 1 } });
     expect((await tel).data.battery?.pct).toBe(1);
   });
+
+  it("refuses a plain claim on a held lease without closing the client; steal takes it", async () => {
+    const robot = makeClient({ kind: "robot", name: "sim-claim", enrollmentKey: server.enrollKey });
+    const robotId = (await robot.connect()).client_id;
+    const ada = makeClient({ kind: "operator", name: "ada", enrollmentKey: await mintOperatorInvite() });
+    await ada.connect();
+    const rec = recordingWebSocket();
+    const bob = makeClient({
+      kind: "operator",
+      name: "bob",
+      enrollmentKey: await mintOperatorInvite(),
+      WebSocket: rec.WebSocket,
+    });
+    await bob.connect();
+
+    const adaGrant = next<Envelope<"lease.granted">>((h) => ada.on("lease.granted", h), undefined, "ada lease.granted");
+    ada.send("lease.claim", { robot_id: robotId });
+    const adaLease = (await adaGrant).payload;
+
+    // Bob's plain claim is refused with a conflict that names ada's lease. The
+    // claim carries no id, so the reply has no ref: the lease is what tells
+    // the client this conflict is a reply and not the server closing it.
+    const refused = next<Envelope<"error">>((h) => bob.on("error", h), undefined, "bob's conflict");
+    bob.send("lease.claim", { robot_id: robotId });
+    const conflict = (await refused).payload;
+    expect(conflict.code).toBe("conflict");
+    expect(conflict.ref).toBeUndefined();
+    expect(conflict.lease).toEqual(adaLease);
+    expect(bob.state).toBe("open");
+
+    // Had the refusal been taken for a takeover notice, this drop would close
+    // bob for good. It must reconnect like any other network drop.
+    const reopened = waitState(bob, "open");
+    rec.sockets.at(-1)!.close();
+    await reopened;
+
+    // With steal, bob takes the wheel and ada is told her lease was stolen.
+    const stolen = next<Envelope<"lease.revoked">>((h) => ada.on("lease.revoked", h), undefined, "ada lease.revoked");
+    const bobGrant = next<Envelope<"lease.granted">>((h) => bob.on("lease.granted", h), undefined, "bob lease.granted");
+    bob.send("lease.claim", { robot_id: robotId, steal: true });
+    const bobLease = (await bobGrant).payload;
+    expect(bobLease.operator_id).toBe(bob.clientId);
+    expect(bobLease.lease_id).not.toBe(adaLease.lease_id);
+    expect((await stolen).payload).toEqual({ lease_id: adaLease.lease_id, robot_id: robotId, reason: "stolen" });
+  });
 });

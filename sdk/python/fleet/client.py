@@ -34,7 +34,10 @@ refusal is terminal and closes the client: ``auth_failed`` (bad or revoked
 token, including one revoked while connected; bad enrollment key),
 ``conflict`` (another connection took over this identity, so reconnecting
 would just kick it back and ping-pong; also a reused invite key), and the
-rest. The client never clears the token store by itself.
+rest. The client never clears the token store by itself. A ``conflict`` that
+answers one of our own sends (a ``lease.claim`` refused because another
+operator holds the robot) is an ordinary error reply: it reaches
+``on("error")`` and closes nothing.
 
 From synchronous code, run it with ``asyncio.run(client.run_forever())``.
 """
@@ -416,8 +419,13 @@ class FleetClient:
                     # After welcome, errors are replies to our sends and do not
                     # close the socket, except these three, sent right before
                     # close (auth_failed: this client's token was revoked).
-                    code = env["payload"].get("code")
-                    if code in ("conflict", "rate_limited", "auth_failed"):
+                    # The same codes also come as plain replies: a refused
+                    # lease.claim is a conflict. A reply names the message it
+                    # answers (ref) or, for the refused claim, the lease in
+                    # the way; the closing notice has neither.
+                    payload = env["payload"]
+                    reply = "ref" in payload or "lease" in payload
+                    if not reply and payload.get("code") in ("conflict", "rate_limited", "auth_failed"):
                         last_error = _error_from(env)
                 self._dispatch(env)
         except ConnectionClosed:

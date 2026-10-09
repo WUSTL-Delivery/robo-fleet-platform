@@ -225,6 +225,69 @@ async def test_takeover_by_same_identity_is_terminal_not_ping_pong(fleet_server,
     assert second.state is ConnectionState.OPEN
 
 
+async def test_refused_claim_conflict_is_a_reply_not_a_takeover(fleet_server, clients):
+    """A plain lease.claim on a robot another operator holds answers ``conflict``.
+    That is a reply, not the server closing us: the client stays open and, when
+    the socket later drops, reconnects instead of stopping for good."""
+
+    def mint_invite() -> str:
+        req = urllib.request.Request(
+            f"{fleet_server.http_url}/api/admin/fleets/{fleet_server.fleet}/operator-invites",
+            method="POST",
+            headers={"Authorization": f"Bearer {fleet_server.admin_token}"},
+        )
+        with urllib.request.urlopen(req) as res:
+            return json.load(res)["key"]
+
+    loop = asyncio.get_running_loop()
+    robot = make(clients, fleet_server, kind="robot", enrollment_key=fleet_server.enroll_key)
+    robot_id = (await robot.connect())["client_id"]
+    ada = make(clients, fleet_server, kind="operator", name="ada", enrollment_key=await asyncio.to_thread(mint_invite))
+    await ada.connect()
+    bob: RecordingClient = make(
+        clients,
+        fleet_server,
+        cls=RecordingClient,
+        kind="operator",
+        name="bob",
+        enrollment_key=await asyncio.to_thread(mint_invite),
+    )
+    await bob.connect()
+
+    granted: asyncio.Future[dict[str, Any]] = loop.create_future()
+    ada.on("lease.granted", lambda env: granted.done() or granted.set_result(env["payload"]))
+    await ada.send("lease.claim", {"robot_id": robot_id})
+    ada_lease = await asyncio.wait_for(granted, 5)
+
+    # No id on the claim, so no ref on the reply: the lease marks it as a reply.
+    err: asyncio.Future[dict[str, Any]] = loop.create_future()
+    bob.on("error", lambda env: err.done() or err.set_result(env["payload"]))
+    await bob.send("lease.claim", {"robot_id": robot_id})
+    refused = await asyncio.wait_for(err, 5)
+    assert refused["code"] == "conflict" and "ref" not in refused
+    assert refused["lease"] == ada_lease
+    assert bob.state is ConnectionState.OPEN
+
+    reopened = asyncio.ensure_future(wait_for_state(bob, ConnectionState.OPEN))
+    bob.sockets[-1].transport.abort()
+    await reopened
+    await asyncio.sleep(0.3)
+    assert bob.state is ConnectionState.OPEN
+
+    # With steal the same claim is granted and ada's lease is revoked as stolen.
+    stolen: asyncio.Future[dict[str, Any]] = loop.create_future()
+    ada.on("lease.revoked", lambda env: stolen.done() or stolen.set_result(env["payload"]))
+    taken: asyncio.Future[dict[str, Any]] = loop.create_future()
+    bob.on("lease.granted", lambda env: taken.done() or taken.set_result(env["payload"]))
+    await bob.send("lease.claim", {"robot_id": robot_id, "steal": True})
+    assert (await asyncio.wait_for(taken, 5))["operator_id"] == bob.client_id
+    assert await asyncio.wait_for(stolen, 5) == {
+        "lease_id": ada_lease["lease_id"],
+        "robot_id": robot_id,
+        "reason": "stolen",
+    }
+
+
 async def test_token_revoked_while_connected_is_terminal(fleet_server, clients):
     robot: RecordingClient = make(
         clients, fleet_server, cls=RecordingClient, kind="robot", enrollment_key=fleet_server.enroll_key

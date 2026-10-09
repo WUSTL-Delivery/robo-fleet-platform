@@ -31,7 +31,8 @@ The atomic core gets the densest coverage:
 
 - `server/internal/ops` — intervention FSM + leases with an **injected fake clock**:
   legal/illegal transitions, claim from HELP_REQUESTED and proactive claim from
-  AUTONOMOUS, steal = revoke + reissue, renew extends, expiry returns robot to
+  AUTONOMOUS, a plain claim on a held lease is refused (and of racing plain claims
+  exactly one is granted), steal = revoke + reissue, renew extends, expiry returns robot to
   HELP_REQUESTED, exactly-one-driver invariants.
 - `server/internal/registry` — presence expiry (heartbeat lapses → offline event).
 - `server/internal/store` — token/enroll-key hashing, revocation, against a temp sqlite.

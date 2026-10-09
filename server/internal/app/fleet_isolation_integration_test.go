@@ -242,6 +242,12 @@ func TestIntegrationTwoFleetIsolation(t *testing.T) {
 			t.Fatalf("cross-fleet claim %+v differs from unknown-robot claim %+v", got, unknownClaim)
 		}
 	}
+	// Asking to steal changes nothing about that: still not_found, with no
+	// lease in the answer.
+	opA.send(protocol.TypeLeaseClaim, protocol.LeaseClaim{RobotID: robotBID, Steal: true})
+	if got := opA.nextError(); got != unknownClaim {
+		t.Fatalf("cross-fleet claim with steal: %+v, want %+v", got, unknownClaim)
+	}
 	opA.quiet()
 	robotB.quiet() // no lease.granted reached the robot
 	if sum := onlyRobot(t, opB.quiet(), robotBID); sum.State != protocol.StateHelpRequested || sum.Lease != nil {
@@ -272,10 +278,14 @@ func TestIntegrationTwoFleetIsolation(t *testing.T) {
 	}
 	opA.quiet()
 
-	// Fleet A cannot steal it.
-	opA.send(protocol.TypeLeaseClaim, protocol.LeaseClaim{RobotID: robotBID})
-	if got := opA.nextError(); got != unknownClaim {
-		t.Fatalf("cross-fleet steal: %+v, want %+v", got, unknownClaim)
+	// Fleet A cannot take it, with or without steal, and is not told it is
+	// held: the answer is not_found, never the conflict (and the lease it
+	// carries) that fleet B's own operators would get.
+	for _, steal := range []bool{false, true} {
+		opA.send(protocol.TypeLeaseClaim, protocol.LeaseClaim{RobotID: robotBID, Steal: steal})
+		if got := opA.nextError(); got != unknownClaim {
+			t.Fatalf("cross-fleet claim of a held robot (steal=%v): %+v, want %+v", steal, got, unknownClaim)
+		}
 	}
 
 	// --- lease.renew / lease.release / twist with fleet B's lease id ---

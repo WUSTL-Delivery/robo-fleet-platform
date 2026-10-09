@@ -45,7 +45,11 @@
     "lease.claim": {
       "type": "object",
       "properties": {
-        "robot_id": { "type": "string", "minLength": 1 }
+        "robot_id": { "type": "string", "minLength": 1 },
+        "steal": {
+          "description": "True to take the robot from another operator who holds its lease (revoke + reissue). Absent or false, a claim on a robot leased to another operator is refused with error{code: conflict}.",
+          "type": "boolean"
+        }
       },
       "required": ["robot_id"],
       "additionalProperties": false

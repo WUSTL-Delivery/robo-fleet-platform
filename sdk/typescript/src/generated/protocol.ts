@@ -192,6 +192,8 @@ export interface ErrorPayload {
   code: "auth_failed" | "invalid_message" | "not_found" | "not_authorized" | "conflict" | "rate_limited";
   message: string;
   ref?: string;
+  /** Set only on the conflict that refuses a lease.claim: the lease that is in the way, as held at the moment of the refusal. */
+  lease?: Lease;
 }
 
 /** Source: `protocol/schemas/ops.schema.json#/$defs/subscribe` */
@@ -221,6 +223,8 @@ export interface EventPayload {
 /** Source: `protocol/schemas/ops.schema.json#/$defs/lease.claim` */
 export interface LeaseClaimPayload {
   robot_id: string;
+  /** True to take the robot from another operator who holds its lease (revoke + reissue). Absent or false, a claim on a robot leased to another operator is refused with error{code: conflict}. */
+  steal?: boolean;
 }
 
 /** Source: `protocol/schemas/ops.schema.json#/$defs/lease.granted` */

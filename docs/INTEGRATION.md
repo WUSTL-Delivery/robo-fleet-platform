@@ -209,11 +209,23 @@ kind's column returns `error{code: not_authorized}`.
 | `channel.publish` | ✓ | ✓ | ✓ | opaque domain payload, see 2.6 |
 | `signal` | ✓ | ✓ | ✓ | WebRTC offer/answer/ice relay to `to`, server stamps `from` |
 | `layer.declare` / `layer.update` | | ✓ | | GeoJSON map layers, see 2.7 |
-| `lease.claim` / `lease.renew` / `lease.release` | | | ✓ | intervention authority |
+| `lease.claim` / `lease.renew` / `lease.release` | | | ✓ | intervention authority; a claim on a robot another operator is driving is refused unless it says `steal: true` (below) |
 | `twist` | | | ✓ | must carry a live `lease_id` the sender holds |
 
 Everything is scoped to the fleet the token belongs to. A `to` target in another fleet
 looks identical to a disconnected one: `error{code: not_found}`.
+
+**Claim and steal.** `lease.claim {robot_id}` is granted when the robot is free (or the
+caller already holds it). When another operator of the fleet holds the lease, the claim
+is refused with `error{code: conflict}` and nothing changes: no revocation, no event,
+the holder keeps driving. The error carries the holder's `lease` (`lease_id`, `robot_id`,
+`operator_id`, `expires_at_ms`), so a console can show who is driving and offer a
+takeover. Taking the robot from them is `lease.claim {robot_id, steal: true}`: their
+lease is revoked with reason `stolen` and a new one is issued. Two operators who claim
+the same queued robot at the same moment therefore end with one driver and one refusal,
+never a silent takeover. This changed an existing message: a claim on a held robot used
+to steal it, so a client written against that behaviour must now send `steal: true`.
+Details and examples: "Claiming a lease" in `protocol/README.md`.
 
 ### 2.5 Subscribe: snapshot, then stream
 
@@ -292,6 +304,11 @@ message that caused it when there was one. Errors do not close the socket except
 the handshake, on heartbeat lapse (`rate_limited`), on takeover by a newer connection
 (`conflict`), and on token revocation (`auth_failed`); in those cases the error is the
 last frame before the close.
+
+`conflict` is also the ordinary reply to a `lease.claim` on a robot another operator
+holds (2.4). That one keeps the socket open and carries a fourth field, `lease`, the
+lease in the way. A closing error has neither `ref` nor `lease`; the TypeScript and
+Python clients use that to keep a refused claim from ending the connection.
 
 `telemetry` and `channel.publish` are rate limited per connection, each type with its own
 token bucket (`client_msgs_per_sec`, `client_msgs_burst`; defaults 50/s and 100). Over the

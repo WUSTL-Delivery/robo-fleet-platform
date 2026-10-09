@@ -33,13 +33,13 @@ rejected for typed clients; domain traffic never invents envelope types — it r
 | `help.request` | robot → server | AUTONOMOUS → HELP_REQUESTED; enters intervention queue |
 | `subscribe` / `snapshot` | client → server / reply | **snapshot-then-stream**: current fleet state, then live events |
 | `event` | server → subscribers | typed lifecycle events (`robot.online`, `robot.help_requested`, `operator.online`, …) |
-| `lease.claim` / `lease.renew` / `lease.release` | operator → server | authority requests; every transition is server-side |
+| `lease.claim` / `lease.renew` / `lease.release` | operator → server | authority requests; every transition is server-side. A claim takes a robot from another operator only with `steal: true` (see [Claiming a lease](#claiming-a-lease)) |
 | `lease.granted` / `lease.revoked` | server → operator+robot | the lease itself; steal/expiry/operator-loss arrive as `revoked` |
 | `twist` | operator → robot | body-frame setpoint **carrying lease_id**; rides the WebRTC datachannel (bus fallback in sim), robot rejects without current lease |
 | `signal` | relayed via server | WebRTC offer/answer/ICE; sender sets `to`, server stamps `from` |
 | `channel.publish` / `channel.message` | service ↔ server ↔ client | opaque domain channels (assignments, edge reports); at-most-once (see [Acked send](#acked-send-convention-on-channel-data)) |
 | `layer.declare` / `layer.update` | service → server | map layers (GeoJSON first); console renders generically |
-| `error` | server → client | `auth_failed`, `invalid_message`, `not_found`, `not_authorized`, `conflict`, `rate_limited` |
+| `error` | server → client | `auth_failed`, `invalid_message`, `not_found`, `not_authorized`, `conflict`, `rate_limited`; a refused `lease.claim` also carries the `lease` in the way |
 
 ## Conventions
 
@@ -50,6 +50,56 @@ rejected for typed clients; domain traffic never invents envelope types — it r
 - Robot FSM: `AUTONOMOUS | HELP_REQUESTED | TELEOP` — platform vocabulary only.
 - Versioning: `v` bumps only on incompatible envelope change; message-level evolution is
   additive (new optional fields) until a type is redesigned under a new name.
+
+## Claiming a lease
+
+```json
+{ "v": 0, "type": "lease.claim", "id": "claim-1", "payload": { "robot_id": "r_1a2b3c4d" } }
+{ "v": 0, "type": "lease.claim", "id": "claim-2", "payload": { "robot_id": "r_1a2b3c4d", "steal": true } }
+```
+
+`steal` is optional; leaving it out is the same as `false`. What a claim does depends on
+who holds the robot's lease when the server handles it:
+
+| the robot's lease is held by | plain claim | claim with `steal: true` |
+|---|---|---|
+| nobody | granted | granted |
+| the claiming operator | granted: a new lease replaces the old one | same |
+| another operator of the fleet | **refused**: `error{code: conflict}`, nothing changes | granted: the holder's lease is revoked (`reason: "stolen"`) and a new one is issued |
+
+- **A refused claim changes nothing and tells nobody else.** No `lease.revoked`, no
+  `lease.granted`, no event. The holder keeps driving and never learns of it.
+- **Two claims at the same moment.** When two operators send a plain claim for the same
+  free robot, exactly one is granted and the other gets the conflict. Neither can take
+  the robot from the other by accident; taking it is always the explicit `steal`.
+- **The conflict names the lease in the way**, so a console can say who is driving
+  without a fresh snapshot:
+
+  ```json
+  { "code": "conflict", "message": "robot is leased to another operator", "ref": "claim-1",
+    "lease": { "lease_id": "ls_7f8e9d0c", "robot_id": "r_1a2b3c4d",
+               "operator_id": "o_9c8d7e6f", "expires_at_ms": 1755100015000 } }
+  ```
+
+  `lease` is the same object the holder was granted and that `snapshot` lists on the
+  robot. It is set on this one error and no other. `ref` is the claim's envelope `id`,
+  absent when the claim had none.
+- **This conflict is a reply, not a disconnect.** The server also sends
+  `error{code: conflict}` as the last frame before it closes a connection that a newer
+  one replaced. That notice has neither `ref` nor `lease`; a client tells the two apart
+  by those fields and MUST NOT treat a refused claim as the end of its connection.
+- **Other fleets.** A claim on a robot of another fleet is `not_found`, with or without
+  `steal` and whether or not the robot is leased, exactly like an id that does not exist.
+  It never gets the conflict, so a lease never leaks across fleets.
+- A lease past its `expires_at_ms` still counts as held until the server's sweep revokes
+  it (`reason: "expired"`, within `sweep_ms`); a plain claim in that gap is refused.
+
+**Changed in place.** Before `steal` existed, every claim on a held robot stole it. A
+client that relied on that now gets the conflict and has to send `steal: true` to take
+over from another operator. Claims on a free robot, renewals and handback are unchanged.
+
+Golden examples: `fixtures/valid/lease-claim.json`, `fixtures/valid/lease-claim-steal.json`,
+`fixtures/valid/error-claim-conflict.json`.
 
 ## Help details (the intervention queue entry)
 

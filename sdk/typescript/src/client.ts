@@ -51,7 +51,9 @@
 // including one revoked while connected; bad enrollment key), `conflict`
 // (another connection took over this identity, so reconnecting would just kick
 // it back and ping-pong; also a reused invite key), and the rest. The client
-// never clears the TokenStore by itself.
+// never clears the TokenStore by itself. A `conflict` that answers one of our
+// own sends (a lease.claim refused because another operator holds the robot)
+// is an ordinary error reply: it reaches on("error") and closes nothing.
 //
 // Browser-safe: uses the global WebSocket unless one is injected (Node 20 has no
 // global WebSocket; pass e.g. the `ws` package's constructor there).
@@ -612,9 +614,13 @@ export class FleetClient {
         // Before welcome any error is the handshake's answer. After it, errors
         // are replies to our sends and do not close the socket, except these
         // three, which the server sends right before it closes (auth_failed:
-        // this client's token was revoked).
-        const c = env.payload.code;
-        if (!welcomed || c === "conflict" || c === "rate_limited" || c === "auth_failed") {
+        // this client's token was revoked). The same codes also come as plain
+        // replies: a refused lease.claim is a conflict. A reply names the
+        // message it answers (`ref`) or, for the refused claim, the lease in
+        // the way; the closing notice has neither.
+        const { code: c, ref, lease } = env.payload;
+        const reply = ref !== undefined || lease !== undefined;
+        if (!welcomed || (!reply && (c === "conflict" || c === "rate_limited" || c === "auth_failed"))) {
           lastError = new FleetClientError(c, env.payload.message);
         }
       }
