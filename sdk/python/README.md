@@ -126,8 +126,9 @@ cp .env.example .env        # set FLEET_URL and FLEET_ENROLL_KEY
 `run_fake_robot.sh` loads `examples/.env` (git-ignored) and creates `sdk/python/.venv` on
 first use, with the `webrtc` extra, so the fake robot answers the console's WebRTC offer
 and prints `twist over the WebRTC data channel` or `twist over the bus` as the operator's
-transport changes (`--no-data-channel` keeps it on the bus; `--ice-servers` or
-`FLEET_ICE_SERVERS` takes a JSON list of STUN/TURN servers). While it runs, type `h` + Enter to ask for help, `p` to pause wandering, `q`
+transport changes (`--no-data-channel` keeps it on the bus). It uses the STUN/TURN
+servers the fleet-server is configured with; `--ice-servers` or `FLEET_ICE_SERVERS` takes
+a JSON list to use instead of them. While it runs, type `h` + Enter to ask for help, `p` to pause wandering, `q`
 to quit. The first run saves a token to `~/.fleet/<name>.json`; later runs come back as
 the same robot without the key. Retire test robots with `fleetctl client revoke`.
 
@@ -169,7 +170,9 @@ await robot.close()
 | `await connect()` | `enroll.request` (first run only), `hello`, then the `manifest`. Returns the `welcome` payload |
 | `await telemetry(pose=, battery=, velocity=, health=)` | one `telemetry`. Pose comes from `geo_pose()` or `local_pose()`, never bare lat/lon. Returns `False` (and drops the sample) while disconnected |
 | `await request_help(reason, context=None)` | `help.request`: the robot raises its hand for an operator |
-| `Robot(..., data_channel=None, ice_servers=None)` | nothing on the wire. With the `webrtc` extra installed the robot answers the lease holder's WebRTC offer; see [Twist over WebRTC](#twist-over-webrtc) |
+| `Robot(..., data_channel=None, ice_servers=None)` | nothing at once. With the `webrtc` extra installed the robot answers the lease holder's WebRTC offer, and sends `ice.request` when it takes a lease to learn the installation's STUN/TURN servers; see [Twist over WebRTC](#twist-over-webrtc) |
+| `await client.ice_config(timeout=2.0)` | `ice.request`; returns the `ice.config` payload (`ice_servers`, `expires_at_ms`). Raises `FleetClientError` on a refusal, no answer in time, or a server that predates the message (`invalid_message`). On `FleetClient`, so `robot.client.ice_config()` |
+| `await client.ice_servers(timeout=2.0)` | the same request; returns the list for `RTCConfiguration.iceServers` and never raises: any failure is `[]` |
 | `on_twist(handler)` | `handler(TwistCommand)`: `linear_x`, `linear_y`, `angular_z`, `source` (`operator`, `deadman`, `revoked`, `disconnected`), `lease_id`, `is_stop`, `via` (`bus` or `p2p` for an operator setpoint, `None` for a stop) |
 | `on_lease(handler)` | `handler(LeaseChange)`: `granted`, `lease_id`, `operator_id`, `reason` on revoke (`None` when the lease ended while the robot was disconnected) |
 | `channel(name).on_message(handler)` | `handler(sender, data)` for `channel.message`; `sender` is stamped by the server |
@@ -280,11 +283,23 @@ That is all it takes: with aiortc importable, `Robot` answers the offer, and cha
 twists reach the same `on_twist` handler as bus twists.
 
 ```python
-robot = Robot(url, manifest=..., name="bot-1", token_store=...,
-              ice_servers=[{"urls": "stun:stun.example.org:3478"},
-                           {"urls": "turn:turn.example.org:3478", "username": "u", "credential": "p"}])
+robot = Robot(url, manifest=..., name="bot-1", token_store=...)
 robot.on_twist(lambda cmd: base.drive(cmd.linear_x, cmd.angular_z))   # cmd.via is "bus" or "p2p"
 ```
+
+There is nothing to configure on the robot. The STUN and TURN servers are the
+fleet-server's configuration ([`docs/INTEGRATION.md`, 7.1](../../docs/INTEGRATION.md)), and
+the robot asks for them.
+
+| `ice_servers=` | the peer connection is created with |
+|---|---|
+| `None` (default) | what the server answers to `ice.request`: the installation's servers with a TURN credential minted for this robot, or none if the installation has none |
+| a list, e.g. `[{"urls": "stun:stun.example.org:3478"}]` | exactly that list, every time. The server is never asked |
+| `[]` | nothing, whatever the server is configured with. The server is never asked |
+
+An explicit list wins outright; the two are never merged. A robot that names its own
+servers is saying it knows better than the installation, which is rare: a bench setup, or
+a TURN server only that robot can reach.
 
 | `data_channel=` | behaviour |
 |---|---|
@@ -296,11 +311,24 @@ robot.on_twist(lambda cmd: base.drive(cmd.linear_x, cmd.angular_z))   # cmd.via 
   current lease, for that lease id. Every channel twist passes the same lease check as a
   bus twist and restarts the same 300 ms deadman. A revoke closes the peer connection;
   closing a peer connection never ends a lease.
-- **`ice_servers` has no default.** With none, only host candidates are used, which is
-  enough on one machine or one LAN and sends nothing to a third party. Across networks
-  (robot on LTE, operator at home) give both sides a STUN server, and a TURN server if
-  either is behind a symmetric NAT. Each entry is `{"urls": ..., "username": ...,
-  "credential": ...}`.
+- **The robot asks once per lease.** It sends `ice.request` when it takes a lease (from
+  `lease.granted`, or from the `welcome` of a reconnect that names a lease it did not
+  know), so the answer is there before the operator's offer. Every session under that
+  lease uses it until 10 s before the credential's `expires_at_ms`; after that the robot
+  asks again when the next offer arrives. A new lease always asks afresh.
+- **No answer is not a refusal to connect.** If the server does not answer within 2 s,
+  refuses, or is too old to know the message (`error{code: invalid_message}`), the peer
+  connection is created with no ICE servers. That is enough on one machine or one LAN.
+  The next offer asks again.
+- **No ICE server is ever assumed.** With none configured anywhere the robot uses host
+  candidates only and sends nothing to a third party; there is no default public STUN
+  server. Across networks (robot on LTE, operator at home) the installation needs a STUN
+  server, and a TURN server where either side is behind a symmetric NAT.
+- **A silent ICE server costs two seconds, not the session.** aiortc asks the STUN
+  server from every interface address and waits for each. An interface that cannot reach
+  it (a VPN, a container bridge) would hold the answer back five seconds, which is the
+  console's whole connect timeout. The SDK caps the wait at 2 s (`GATHER_TIMEOUT_S`) and
+  answers with what it has.
 - **One transport at a time is the operator's job; the robot takes both.** A bus twist is
   ignored if a channel twist was obeyed within the last 300 ms, so a late bus twist cannot
   replace a newer setpoint. Channel twists carry a `seq`; older or repeated ones are

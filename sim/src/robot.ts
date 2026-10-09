@@ -66,7 +66,13 @@ export interface SimRobotOptions {
   deadmanMs?: number;
   /** false: never answer a WebRTC offer, so twist stays on the bus. Default true. */
   p2p?: boolean;
-  /** STUN/TURN servers for the data channel. None are needed on loopback or one LAN. */
+  /**
+   * A fixed STUN/TURN list for the data channel, instead of the server's.
+   * Leave it out: the robot then asks the server for the installation's ICE
+   * servers when it takes a lease (protocol/README.md, "ICE servers"). Given,
+   * even as an empty list, it is used as it is and the server is never asked;
+   * that is for tests.
+   */
   iceServers?: { urls: string | string[]; username?: string; credential?: string }[];
   random?: () => number;
   log?: (line: string) => void;
@@ -142,6 +148,14 @@ export class SimRobot {
   /** Whether the operator's twist data channel is open. */
   get peerOpen(): boolean {
     return this.#peer?.open ?? false;
+  }
+  /** The ICE servers the newest peer connection was created with; undefined before the first. */
+  get peerIceServers(): readonly { urls: string | string[]; username?: string; credential?: string }[] | undefined {
+    return this.#peer?.iceServers;
+  }
+  /** How many times this robot has asked the server for ICE servers. */
+  get iceRequests(): number {
+    return this.#peer?.iceRequests ?? 0;
   }
   /** Drops the WebRTC peer as a dead link would, keeping the lease. */
   dropPeer(): void {

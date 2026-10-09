@@ -12,6 +12,9 @@
 //   - If the channel closes, the peer connection fails, or pings go
 //     unanswered for PONG_TIMEOUT_MS, twist is back on the bus at once and a
 //     fresh offer is made after a pause.
+//   - The ICE servers are asked for before every offer, the retries included
+//     (their TURN credential is short-lived), and twist is on the bus while
+//     the answer is awaited.
 //
 // It carries data only. Claim, steal and handback stay server actions; the
 // caller closes this when the lease ends, whatever the reason.
@@ -98,6 +101,15 @@ export interface PeerLike {
 
 export type CreatePeer = (config: { iceServers: IceServer[] }) => PeerLike;
 
+/**
+ * Where a session's ICE servers come from: a fixed list, or a function asked
+ * before every offer. The function must settle; a rejection counts as no
+ * servers. `() => client.iceServers()` is the one the console uses: it asks
+ * the server each time and resolves with an empty list within two seconds
+ * whatever goes wrong.
+ */
+export type IceServerSource = IceServer[] | (() => Promise<IceServer[]>);
+
 export interface TwistTransportOptions {
   /** The control connection: carries the signaling and receives the robot's answers. */
   client: Pick<FleetClient, "send" | "on">;
@@ -107,10 +119,13 @@ export interface TwistTransportOptions {
   sendBus: (payload: TwistPayload) => void;
   onStatus?: (status: TwistLinkStatus) => void;
   /**
-   * STUN/TURN servers. None are needed on loopback or one LAN; the server will
-   * hand a list to clients later, and it goes in here.
+   * STUN/TURN servers for the peer connection (protocol/README.md, "ICE
+   * servers"). Pass `() => client.iceServers()` to use the installation's:
+   * the function is called before every offer, each retry included, because
+   * the TURN credential in the answer expires. A fixed list is used as it is
+   * for every offer. Absent means none, which is enough on loopback or one LAN.
    */
-  iceServers?: IceServer[];
+  iceServers?: IceServerSource;
   /** Defaults to the browser's RTCPeerConnection; absent there means bus only. */
   createPeer?: CreatePeer;
 }
@@ -143,7 +158,7 @@ let signals = 0;
 
 export function openTwistTransport(o: TwistTransportOptions): TwistTransport {
   const createPeer = o.createPeer ?? browserPeer();
-  const iceServers = o.iceServers ?? [];
+  const iceSource = o.iceServers ?? [];
   let status: TwistLinkStatus = createPeer ? { active: "bus", direct: "connecting" } : BUS_ONLY;
   let session: Session | undefined;
   let closed = false;
@@ -225,7 +240,30 @@ export function openTwistTransport(o: TwistTransportOptions): TwistTransport {
     }
   };
 
+  /**
+   * One offer. The ICE servers come first: a fixed list at once, a function
+   * awaited. Nothing waits on it but the offer; twist is on the bus meanwhile.
+   */
   function start(): void {
+    if (closed || !createPeer) return;
+    if (typeof iceSource !== "function") return offer(iceSource);
+    setStatus({ active: "bus", direct: "connecting" });
+    let asked: Promise<IceServer[]>;
+    try {
+      asked = iceSource();
+    } catch {
+      asked = Promise.resolve([]);
+    }
+    void asked
+      .then(
+        (list) => (Array.isArray(list) ? list : []),
+        () => [] as IceServer[], // no list is no reason to give up on the direct path
+      )
+      // offer() does nothing if the transport was closed while the answer was on its way.
+      .then(offer);
+  }
+
+  function offer(iceServers: IceServer[]): void {
     if (closed || !createPeer) return;
     let pc: PeerLike;
     let dc: ChannelLike;
@@ -247,6 +285,7 @@ export function openTwistTransport(o: TwistTransportOptions): TwistTransport {
       live: false,
       waitingSince: undefined,
       ping: undefined,
+      // Counted from here, not from start(): the wait for the ICE servers is not the robot's.
       connect: setTimeout(() => fail(s), CONNECT_TIMEOUT_MS),
     };
     session = s;

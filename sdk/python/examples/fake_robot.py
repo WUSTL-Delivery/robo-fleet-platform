@@ -51,8 +51,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-data-channel", action="store_true",
                    help="never answer a WebRTC offer; twist over the bus only")
     p.add_argument("--ice-servers", default=env("FLEET_ICE_SERVERS", ""),
-                   help='STUN/TURN servers as JSON, e.g. \'[{"urls": "stun:stun.example.org:3478"}]\'. '
-                        "Default none: host candidates only, enough on one machine or one LAN")
+                   help='STUN/TURN servers as JSON, e.g. \'[{"urls": "stun:stun.example.org:3478"}]\', '
+                        "to use instead of the fleet-server's. Default: ask the server for the "
+                        "installation's (none configured there means host candidates only)")
     return p.parse_args()
 
 

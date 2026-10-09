@@ -3,7 +3,9 @@
 // a temp sqlite db and a declared fleet + enrollment key, and hands the test
 // files what they need via inject("fleetServer"). A second server from the same
 // binary, inject("shortLeaseServer"), expires leases after two seconds, for the
-// tests that need a lease to run out.
+// tests that need a lease to run out. A test that needs a server configured
+// its own way starts one from the same binary with startFleetServer() and
+// inject("fleetServerBin").
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -27,6 +29,8 @@ declare module "vitest" {
   export interface ProvidedContext {
     fleetServer: FleetServer;
     shortLeaseServer: FleetServer;
+    /** Path of the built fleet-server binary, for startFleetServer(). */
+    fleetServerBin: string;
   }
 }
 
@@ -59,8 +63,16 @@ async function waitHealthy(httpUrl: string, proc: ChildProcess, output: () => st
   throw new Error(`fleet-server not healthy in 15s:\n${output()}`);
 }
 
-/** Starts the binary on a free port with its own database. Returns its config and how to stop it. */
-async function start(bin: string, fleet: string, leaseTtlMs: number): Promise<{ cfg: FleetServer; stop: () => Promise<void> }> {
+/**
+ * Starts the binary on a free port with its own database. Returns its config
+ * and how to stop it. `extraEnv` adds server settings (FLEET_TURN_URLS, ...).
+ */
+export async function startFleetServer(
+  bin: string,
+  fleet: string,
+  leaseTtlMs: number,
+  extraEnv: Record<string, string> = {},
+): Promise<{ cfg: FleetServer; stop: () => Promise<void> }> {
   const dir = mkdtempSync(join(tmpdir(), "fleet-sim-"));
   const port = await freePort();
   const cfg: FleetServer = {
@@ -86,6 +98,7 @@ async function start(bin: string, fleet: string, leaseTtlMs: number): Promise<{ 
       FLEET_BOOTSTRAP_FLEET: cfg.fleet,
       FLEET_BOOTSTRAP_ENROLL_KEY: cfg.enrollKey,
       FLEET_ADMIN_TOKEN: cfg.adminToken,
+      ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -117,10 +130,10 @@ export default async function setup(project: TestProject): Promise<() => Promise
   execFileSync("go", ["build", "-o", bin, "./cmd/fleet-server"], { cwd: serverDir, stdio: "inherit" });
 
   // 15 s is the server's default lease TTL.
-  const main = await start(bin, "sim", 15_000);
-  let short: Awaited<ReturnType<typeof start>>;
+  const main = await startFleetServer(bin, "sim", 15_000);
+  let short: Awaited<ReturnType<typeof startFleetServer>>;
   try {
-    short = await start(bin, "sim-short-lease", 2_000);
+    short = await startFleetServer(bin, "sim-short-lease", 2_000);
   } catch (err) {
     await main.stop();
     rmSync(binDir, { recursive: true, force: true });
@@ -128,6 +141,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
   }
   project.provide("fleetServer", main.cfg);
   project.provide("shortLeaseServer", short.cfg);
+  project.provide("fleetServerBin", bin);
 
   return async () => {
     await Promise.all([main.stop(), short.stop()]);

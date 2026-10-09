@@ -89,6 +89,8 @@ function harness(extra: Partial<TwistTransportOptions> = {}) {
   const signals: Signal[] = [];
   const bus: TwistPayload[] = [];
   const statuses: TwistLinkStatus[] = [];
+  /** The configuration each peer was created with. */
+  const configs: unknown[] = [];
   let onSignal: ((e: { payload: Signal }) => void) | undefined;
   const client = {
     send: (_type: string, payload: Signal) => {
@@ -106,7 +108,8 @@ function harness(extra: Partial<TwistTransportOptions> = {}) {
     leaseId: "ls_7f8e9d0c",
     sendBus: (p) => bus.push(p),
     onStatus: (s) => statuses.push(s),
-    createPeer: () => {
+    createPeer: (config) => {
+      configs.push(config);
       const p = new FakePeer();
       peers.push(p);
       return p;
@@ -121,7 +124,7 @@ function harness(extra: Partial<TwistTransportOptions> = {}) {
     await vi.advanceTimersByTimeAsync(0);
     peers.at(-1)!.channel!.open();
   };
-  return { transport, peers, signals, bus, statuses, connect, deliver: (s: Signal) => onSignal?.({ payload: s }), listening: () => onSignal !== undefined };
+  return { transport, peers, configs, signals, bus, statuses, connect, deliver: (s: Signal) => onSignal?.({ payload: s }), listening: () => onSignal !== undefined };
 }
 
 describe("twist transport", () => {
@@ -265,6 +268,95 @@ describe("twist transport", () => {
     expect(h.peers).toHaveLength(1);
     expect(h.statuses).toHaveLength(seen);
     expect(h.peers[0]!.channel!.twists()).toHaveLength(0);
+  });
+
+  describe("ICE servers", () => {
+    const STUN = { urls: ["stun:turn.example.org:3478"] };
+    const turn = (n: number) => ({ urls: ["turn:turn.example.org:3478?transport=udp"], username: `${n}:o_1`, credential: `cred-${n}` });
+
+    const iceHarness = (iceServers: TwistTransportOptions["iceServers"]) =>
+      harness(iceServers !== undefined ? { iceServers } : {});
+
+    it("creates the peer with an explicit empty list when none are given", async () => {
+      const h = iceHarness(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.configs).toEqual([{ iceServers: [] }]);
+    });
+
+    it("passes a fixed list unchanged to every peer", async () => {
+      const h = iceHarness([STUN]);
+      await h.connect();
+      h.peers[0]!.channel!.die();
+      await vi.advanceTimersByTimeAsync(RETRY_AFTER_MS);
+      expect(h.configs).toEqual([{ iceServers: [STUN] }, { iceServers: [STUN] }]);
+    });
+
+    it("asks before the first offer and again before each retry, and uses the newest answer", async () => {
+      let asked = 0;
+      const h = iceHarness(async () => [STUN, turn(++asked)]);
+      await h.connect();
+      expect(asked).toBe(1);
+      expect(h.configs).toEqual([{ iceServers: [STUN, turn(1)] }]);
+      expect(h.transport.status.active).toBe("p2p");
+
+      h.peers[0]!.channel!.die();
+      await vi.advanceTimersByTimeAsync(RETRY_AFTER_MS - 1);
+      expect(asked).toBe(1); // not until the retry is due
+      await vi.advanceTimersByTimeAsync(1);
+      expect(asked).toBe(2);
+      expect(h.configs[1]).toEqual({ iceServers: [STUN, turn(2)] });
+      await h.connect();
+      expect(h.transport.status.active).toBe("p2p");
+    });
+
+    it("drives on the bus while the answer is awaited, and starts the connect timeout only when it has come", async () => {
+      let answer!: (list: { urls: string[] }[]) => void;
+      const h = iceHarness(() => new Promise((resolve) => (answer = resolve)));
+      expect(h.transport.status).toEqual({ active: "bus", direct: "connecting" });
+      h.transport.send(FORWARD);
+      expect(h.bus).toHaveLength(1);
+
+      // The answer takes almost the whole connect timeout: no peer, no offer, no failure yet.
+      await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS - 100);
+      expect(h.peers).toHaveLength(0);
+      expect(h.signals).toHaveLength(0);
+      expect(h.transport.status).toEqual({ active: "bus", direct: "connecting" });
+
+      answer([STUN]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.configs).toEqual([{ iceServers: [STUN] }]);
+      expect(h.signals.filter((s) => s.kind === "offer")).toHaveLength(1);
+      // The robot gets the full timeout from the offer, not what the wait left of it.
+      await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS - 1);
+      expect(h.transport.status.direct).toBe("connecting");
+      expect(h.peers[0]!.closed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.transport.status).toEqual({ active: "bus", direct: "retrying" });
+      expect(h.peers[0]!.closed).toBe(true);
+    });
+
+    it("goes ahead with an empty list when asking fails", async () => {
+      const rejects = iceHarness(() => Promise.reject(new Error("no answer")));
+      await rejects.connect();
+      expect(rejects.configs).toEqual([{ iceServers: [] }]);
+      expect(rejects.transport.status.active).toBe("p2p");
+
+      const throws = iceHarness(() => {
+        throw new Error("not connected");
+      });
+      await throws.connect();
+      expect(throws.configs).toEqual([{ iceServers: [] }]);
+    });
+
+    it("creates no peer when it was closed while the answer was on its way", async () => {
+      let answer!: (list: { urls: string[] }[]) => void;
+      const h = iceHarness(() => new Promise((resolve) => (answer = resolve)));
+      h.transport.close();
+      answer([STUN]);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.peers).toHaveLength(0);
+      expect(h.signals).toHaveLength(0);
+    });
   });
 
   it("is bus only where there is no WebRTC", () => {

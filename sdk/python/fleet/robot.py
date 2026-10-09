@@ -196,10 +196,15 @@ class Robot:
                 default) turns it on when the ``webrtc`` extra (aiortc) is
                 installed; True requires it (ImportError if it is missing);
                 False keeps the robot on bus twist only.
-            ice_servers: STUN/TURN servers for the peer connection, each
-                ``{"urls": ..., "username": ..., "credential": ...}``. There is
-                no default: with none, only host candidates are used, which is
-                enough on loopback or one LAN.
+            ice_servers: None (the default) uses the installation's STUN/TURN
+                servers: the robot asks the server for them each time it takes
+                a lease (protocol/README.md, "ICE servers"), and with none
+                configured there, or no answer, uses none, which is enough on
+                loopback or one LAN. A list, each entry
+                ``{"urls": ..., "username": ..., "credential": ...}``, replaces
+                that: it is used as given for every peer connection and the
+                server is never asked. ``[]`` therefore means "none, whatever
+                the server says".
         """
         self._client = FleetClient(
             url,
@@ -288,6 +293,17 @@ class Robot:
     def data_channel_open(self) -> bool:
         """Whether a twist data channel to the lease holder is open right now."""
         return self._peer is not None and self._peer.open
+
+    @property
+    def peer_ice_servers(self) -> list[Any] | None:
+        """The ICE servers the newest peer connection was created with (aiortc ``RTCIceServer``).
+
+        None before the first peer connection, or with the data channel off.
+        An empty list means it was created with none.
+        """
+        if self._peer is None or self._peer.peer_ice_servers is None:
+            return None
+        return list(self._peer.peer_ice_servers)
 
     # ------------------------------------------------------------------ lifecycle
 

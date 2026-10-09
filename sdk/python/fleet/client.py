@@ -21,6 +21,7 @@ layered on top through a small surface::
                                                welcome and fires on EVERY (re)connect, which
                                                is where a layer re-sends its manifest or
                                                re-subscribes
+    await client.ice_servers()                 STUN/TURN servers for a teleop peer connection
     client.state / client.welcome / client.client_id
 
 Each ``on*`` call returns a function that unregisters the handler. Handlers may
@@ -199,6 +200,9 @@ class FleetClient:
         self._any: list[Handler] = []
         self._state_handlers: list[Handler] = []
         self._handler_tasks: set[asyncio.Task[Any]] = set()
+        self._ice_seq = 0
+        #: ice.request sends still waiting for their ice.config, by envelope id.
+        self._ice_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
 
     # ------------------------------------------------------------------ properties
 
@@ -300,6 +304,55 @@ class FleetClient:
         from .channel import Channel
 
         return Channel(self, name)
+
+    async def ice_config(self, *, timeout: float = 2.0) -> dict[str, Any]:
+        """Asks the server for its ICE servers; returns the whole ``ice.config`` payload.
+
+        ``{"ice_servers": [...], "expires_at_ms": ...}``: the installation's
+        STUN/TURN servers in WebRTC's ``RTCIceServer`` shape, with a TURN
+        credential minted for this client, and the time (epoch ms, server
+        clock) after which that credential must not be used for a new peer
+        connection. ``expires_at_ms`` is absent when no entry carries a
+        credential, and ``ice_servers`` is empty when the installation has
+        none configured (protocol/README.md, "ICE servers"). Robots and
+        operators only. Ask before each peer connection rather than keeping
+        the answer: the credential is short-lived.
+
+        Raises FleetClientError when the client is not open (``closed``), no
+        answer comes within ``timeout`` seconds (``timeout``), the connection
+        drops first (``network``), or the server refuses: ``not_authorized``
+        for a service, ``invalid_message`` from a server that predates the
+        message. The refusal also reaches ``on("error")`` handlers, like any
+        other error reply.
+        """
+        self._ice_seq += 1
+        request_id = f"ice-{self._ice_seq}"
+        waiter: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._ice_waiters[request_id] = waiter
+        try:
+            await self.send("ice.request", {}, id=request_id)
+            return await asyncio.wait_for(waiter, timeout)
+        except asyncio.TimeoutError:
+            raise FleetClientError("timeout", "ice.request: no ice.config from the server") from None
+        finally:
+            self._ice_waiters.pop(request_id, None)
+
+    async def ice_servers(self, *, timeout: float = 2.0) -> list[dict[str, Any]]:
+        """The ICE servers to give a teleop peer connection; never raises.
+
+        ``ice_config()["ice_servers"]``, or an empty list on any failure (not
+        connected, no answer in time, a refusal, a server too old to know the
+        message). A peer connection with no ICE servers still works on
+        loopback and on one LAN, and teleop falls back to the bus when it
+        does not, so no failure here is worth giving up the direct path for.
+        Use ``ice_config()`` to see the failure, or the credential's expiry.
+        """
+        try:
+            servers = (await self.ice_config(timeout=timeout)).get("ice_servers")
+        except FleetClientError as e:
+            log.debug("no ICE servers from the server: %s", e)
+            return []
+        return [dict(s) for s in servers if isinstance(s, Mapping)] if isinstance(servers, list) else []
 
     # ------------------------------------------------------------------ internals
 
@@ -427,11 +480,17 @@ class FleetClient:
                     reply = "ref" in payload or "lease" in payload
                     if not reply and payload.get("code") in ("conflict", "rate_limited", "auth_failed"):
                         last_error = _error_from(env)
+                self._settle_ice(env)
                 self._dispatch(env)
         except ConnectionClosed:
             pass
         finally:
             self._stop_heartbeat()
+            # An ice.request is not carried over to the next connection: the
+            # caller asks again when it next needs a peer connection.
+            for waiter in list(self._ice_waiters.values()):
+                if not waiter.done():
+                    waiter.set_exception(FleetClientError("network", "ice.request: connection lost before ice.config"))
             if self._ws is ws:
                 self._ws = None
             if ws.state is not WsState.CLOSED:
@@ -443,6 +502,22 @@ class FleetClient:
             return last_error
         reason = f": {ws.close_reason}" if ws.close_reason else ""
         return FleetClientError("network", f"socket closed ({ws.close_code}{reason})")
+
+    def _settle_ice(self, env: Envelope) -> None:
+        """Hands an ice.config, or the error that answers an ice.request, to the call waiting for it."""
+        if env["type"] not in ("ice.config", "error"):
+            return
+        payload = env["payload"]
+        ref = payload.get("ref")
+        waiter = self._ice_waiters.get(ref) if isinstance(ref, str) else None
+        if waiter is None or waiter.done():
+            return
+        if env["type"] == "ice.config":
+            waiter.set_result(payload)
+        else:
+            waiter.set_exception(
+                FleetClientError(str(payload.get("code", "protocol")), f"ice.request: {payload.get('message', '')}")
+            )
 
     def _on_welcome(self, ws: ClientConnection, welcome: dict[str, Any]) -> None:
         self._welcome = welcome

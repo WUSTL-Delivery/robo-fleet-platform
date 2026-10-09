@@ -203,16 +203,38 @@ def test_message_size_limit_and_optional_fields():
 
 def test_ice_servers_are_config_with_no_default():
     client = object()
-    assert TwistAnswerer(client, on_twist=lambda p: True)._ice == []  # noqa: SLF001
+    # None is "ask the server"; a list, the empty one included, is used as given.
+    assert TwistAnswerer(client, on_twist=lambda p: True)._static is None  # noqa: SLF001
+    assert TwistAnswerer(client, on_twist=lambda p: True, ice_servers=[])._static == []  # noqa: SLF001
     ice = TwistAnswerer(
         client,
         on_twist=lambda p: True,
         ice_servers=[{"urls": "stun:stun.example.org:3478"}, {"urls": ["turn:t.example.org"], "username": "u", "credential": "c"}],
-    )._ice  # noqa: SLF001
+    )._static  # noqa: SLF001
+    assert ice is not None
     assert [s.urls for s in ice] == ["stun:stun.example.org:3478", ["turn:t.example.org"]]
     assert (ice[1].username, ice[1].credential) == ("u", "c")
     with pytest.raises(ValueError):
         TwistAnswerer(client, on_twist=lambda p: True, ice_servers=[{"url": "stun:x"}])
+
+
+async def test_aclose_returns_when_a_task_finished_in_the_same_loop_turn():
+    """A task that is done but whose done callback has not run yet must not make aclose spin.
+
+    Awaiting finished tasks does not yield to the loop, so a loop that waits
+    for the callbacks to empty the set never ends. If this regresses the test
+    hangs rather than fails.
+    """
+    answerer = TwistAnswerer(object(), on_twist=lambda p: True, ice_servers=[])
+
+    async def nothing() -> None:
+        return None
+
+    answerer._spawn(nothing())  # noqa: SLF001
+    await asyncio.sleep(0)  # it runs and finishes; its done callback is queued behind us
+    assert len(answerer._tasks) == 1  # noqa: SLF001
+    await answerer.aclose()
+    assert not answerer._tasks  # noqa: SLF001
 
 
 # ---------------------------------------------------------------------- through the real server
