@@ -68,6 +68,27 @@ export interface SignalPayload {
   data: unknown;
 }
 
+/**
+ * Asks the server for the ICE servers to give a peer connection. Robots and operators only. The reply is ice.config.
+ *
+ * Source: `protocol/schemas/bus.schema.json#/$defs/ice.request`
+ */
+export type IceRequestPayload = Record<string, never>;
+
+/**
+ * The reply to ice.request: the ICE servers this installation is configured with, with TURN credentials minted for the asking client.
+ *
+ * Source: `protocol/schemas/bus.schema.json#/$defs/ice.config`
+ */
+export interface IceConfigPayload {
+  /** Pass as RTCConfiguration.iceServers. Empty when the installation has none configured. */
+  ice_servers: IceServer[];
+  /** Epoch milliseconds, server clock, after which the credentials in ice_servers are refused for a new allocation. Absent when no entry carries credentials. */
+  expires_at_ms?: number;
+  /** The envelope id of the ice.request this answers; absent when the request had none. */
+  ref?: string;
+}
+
 /** Source: `protocol/schemas/bus.schema.json#/$defs/layer.declare` */
 export interface LayerDeclarePayload {
   layer_id: ChannelName;
@@ -170,6 +191,18 @@ export interface OperatorSummary {
   online: boolean;
   /** The robot this operator is looking at. Absent when it is watching none; never set while online is false. */
   watching?: string;
+}
+
+/**
+ * One STUN or TURN server in the shape of WebRTC's RTCIceServer, so it can be passed to a peer connection unchanged. The three field names are WebRTC's, not this protocol's.
+ *
+ * Source: `protocol/schemas/defs.schema.json#/$defs/iceServer`
+ */
+export interface IceServer {
+  /** stun:, stuns:, turn: or turns: URLs of one server. Always an array. */
+  urls: string[];
+  username?: string;
+  credential?: string;
 }
 
 /** Source: `protocol/schemas/defs.schema.json#/$defs/channelName` */

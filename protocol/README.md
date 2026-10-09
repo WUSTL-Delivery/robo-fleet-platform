@@ -38,6 +38,7 @@ rejected for typed clients; domain traffic never invents envelope types — it r
 | `watch` | operator → server | which robot the operator is looking at, or `null` for none; the fleet hears it as `operator.watching` (see [Watching a robot](#watching-a-robot)) |
 | `twist` | operator → robot | body-frame setpoint **carrying lease_id**; rides the WebRTC datachannel (bus fallback in sim), robot rejects without current lease |
 | `signal` | relayed via server | WebRTC offer/answer/ICE; sender sets `to`, server stamps `from` |
+| `ice.request` / `ice.config` | robot or operator → server / reply | the installation's STUN/TURN servers with a short-lived TURN credential for the asker (see [ICE servers](#ice-servers)) |
 | `channel.publish` / `channel.message` | service ↔ server ↔ client | opaque domain channels (assignments, edge reports); at-most-once (see [Acked send](#acked-send-convention-on-channel-data)) |
 | `layer.declare` / `layer.update` | service → server | map layers (GeoJSON first); console renders generically |
 | `error` | server → client | `auth_failed`, `invalid_message`, `not_found`, `not_authorized`, `conflict`, `rate_limited`; a refused `lease.claim` also carries the `lease` in the way |
@@ -431,8 +432,81 @@ replies `error{code: not_found}` to the sender when the target is not connected.
   only from that same operator and only for the current session id.
 - **The operator accepts** `answer` and `ice` only when `from` is the robot it leased
   and `session` is its current session.
-- ICE servers (STUN/TURN) are configuration given to both peers; none are needed on
-  loopback or a single LAN. Neither side may assume a default public STUN server.
+- ICE servers (STUN/TURN) are configuration of the installation, and each peer asks
+  the server for them with `ice.request` before it creates its peer connection (see
+  [ICE servers](#ice-servers)). None are needed on loopback or a single LAN, and an
+  installation may have none. Neither side may assume a default public STUN server.
+
+### ICE servers
+
+Two peers on different networks need a STUN server to find a direct path and a TURN
+server to relay when there is none. Which servers those are is bootstrap configuration
+of the fleet-server (`stun_urls`, `turn_urls`, `turn_secret`; DESIGN.md D1, D11). The
+server hands the addresses out and signs a credential. It never relays media and never
+talks to the TURN server (D2).
+
+```json
+{ "v": 0, "type": "ice.request", "id": "ice-1", "payload": {} }
+```
+
+```json
+{ "v": 0, "type": "ice.config", "payload": {
+    "ice_servers": [
+      { "urls": ["stun:turn.example.org:3478"] },
+      { "urls": ["turn:turn.example.org:3478?transport=udp", "turns:turn.example.org:5349?transport=tcp"],
+        "username": "1755103600:o_9c8d7e6f", "credential": "H5hhCnIJ5Q0i88m4zVts9A7C8Sc=" }
+    ],
+    "expires_at_ms": 1755103600000,
+    "ref": "ice-1" } }
+```
+
+- **`ice_servers` is WebRTC's `RTCIceServer` list**, to be passed unchanged as
+  `RTCConfiguration.iceServers` (`urls`, `username`, `credential` are WebRTC's names,
+  which is why they are not this protocol's usual style). `urls` is always an array.
+  A STUN entry has no `username` or `credential`; a TURN entry has both.
+- **Nothing configured is an empty list**: `{ "ice_servers": [] }`. That is a normal
+  answer, not an error. The peer connection is then created with no ICE servers and
+  finds host candidates only, which is all loopback or one LAN needs.
+- **Robots and operators only.** From a service it is `error{code: not_authorized}`.
+  The request has no fields and names no id; the answer depends only on who asks.
+- **`ref`** is the request's envelope `id`, absent when it had none. Give each request
+  an `id`: a refusal also names it (`error.ref`).
+- **The TURN credential is short-lived and the asker's own.** `username` is
+  `<expiry>:<client id>`, the expiry in Unix seconds; `credential` is
+  `base64(HMAC-SHA1(turn_secret, username))`. This is the time-limited shared-secret
+  scheme of TURN servers (coturn: `use-auth-secret`), so the TURN server verifies it
+  with the same secret and nothing is stored. The secret itself is never sent.
+  `expires_at_ms` is that expiry in epoch milliseconds on the server's clock; it is
+  absent when no entry carries a credential. The lifetime is `turn_credential_ttl_s`
+  (default one hour).
+- **Ask for each session; do not keep the answer around.** Credentials expire, and a
+  client can sit connected for days before it needs a peer connection, which is why
+  this is a request and not part of `welcome`.
+  - The operator sends `ice.request` before each offer: every session, including a
+    retry under the same lease.
+  - The robot sends it when it receives `lease.granted` with a new lease id, so the
+    answer is there by the time the offer comes. It MAY use that answer for every
+    session under that lease until `expires_at_ms`; without one, or past that time, it
+    asks when the offer arrives.
+  - Neither creates a peer connection with a credential past `expires_at_ms`. A
+    session that is already running when its credential expires is left alone: there
+    is no way to hand a live peer connection a new one. Whether its relay survives is
+    up to the TURN server (coturn checks the expiry when the allocation is made; some
+    servers check it again on every refresh), so the lifetime should be longer than a
+    teleop session, and a relayed session that does drop falls back to the bus like
+    any other.
+- **Never wait on it to drive.** Twist starts on the bus when the lease is granted
+  (see [One transport at a time](#one-transport-at-a-time)), so asking costs the driver
+  nothing. If no `ice.config` arrives within 2 s, or the request is refused, the client
+  SHOULD go ahead with an empty list rather than give up on the direct path. An older
+  server answers `error{code: invalid_message}` (unknown message type) with the
+  request's `ref`: treat that as an empty list too.
+- The two peers are told the same servers but hold different credentials. Neither
+  sends its `ice.config` to the other.
+
+Golden examples: `fixtures/valid/ice-request.json`, `fixtures/valid/ice-config.json`
+(its credential is the real HMAC of its username under the secret
+`north-star-turn-secret`, usable as a test vector), `fixtures/valid/ice-config-empty.json`.
 
 ### The data channel
 

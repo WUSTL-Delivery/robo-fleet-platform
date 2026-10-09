@@ -29,6 +29,9 @@ type Config struct {
 	// LayerTTL is how long a service's retained layers outlive its connection.
 	// Zero means DefaultLayerTTL.
 	LayerTTL time.Duration
+	// ICE is the STUN/TURN servers handed to robots and operators on
+	// ice.request. The zero value answers with an empty list.
+	ICE signaling.ICE
 }
 
 // DefaultLayerTTL keeps a service's layers across a restart or a Wi-Fi blip.
@@ -377,6 +380,20 @@ func (a *App) OnMessage(c *gateway.Conn, env protocol.Envelope) {
 			return
 		}
 		tc.Send(protocol.Msg(protocol.TypeSignal, out))
+
+	case protocol.TypeIceRequest:
+		// Only the two ends of a teleop peer connection get TURN credentials.
+		// The answer is the same for every fleet: ICE servers belong to the
+		// installation, and the request names no id.
+		if !require(c, env, kind == store.KindRobot || kind == store.KindOperator) {
+			return
+		}
+		servers, expires := a.cfg.ICE.Servers(time.Now(), c.Client.ID)
+		cfg := protocol.IceConfig{IceServers: servers, Ref: env.ID}
+		if !expires.IsZero() {
+			cfg.ExpiresAtMs = expires.UnixMilli()
+		}
+		c.Send(protocol.Msg(protocol.TypeIceConfig, cfg))
 
 	case protocol.TypeChannelPublish:
 		var pub protocol.ChannelPublish

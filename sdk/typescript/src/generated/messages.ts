@@ -11,6 +11,8 @@ import type {
   HeartbeatPayload,
   HelloPayload,
   HelpRequestPayload,
+  IceConfigPayload,
+  IceRequestPayload,
   LayerDeclarePayload,
   LayerUpdatePayload,
   LeaseClaimPayload,
@@ -55,6 +57,8 @@ export interface MessagePayloads {
   "channel.publish": ChannelPublishPayload;
   "channel.message": ChannelMessagePayload;
   "signal": SignalPayload;
+  "ice.request": IceRequestPayload;
+  "ice.config": IceConfigPayload;
   "layer.declare": LayerDeclarePayload;
   "layer.update": LayerUpdatePayload;
   "error": ErrorPayload;
@@ -85,6 +89,8 @@ export const MESSAGE_TYPES = [
   "channel.publish",
   "channel.message",
   "signal",
+  "ice.request",
+  "ice.config",
   "layer.declare",
   "layer.update",
   "error",

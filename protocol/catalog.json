@@ -23,6 +23,8 @@
     "channel.publish": "schemas/bus.schema.json#/$defs/channel.publish",
     "channel.message": "schemas/bus.schema.json#/$defs/channel.message",
     "signal": "schemas/bus.schema.json#/$defs/signal",
+    "ice.request": "schemas/bus.schema.json#/$defs/ice.request",
+    "ice.config": "schemas/bus.schema.json#/$defs/ice.config",
     "layer.declare": "schemas/bus.schema.json#/$defs/layer.declare",
     "layer.update": "schemas/bus.schema.json#/$defs/layer.update",
     "error": "schemas/error.schema.json#/$defs/error"

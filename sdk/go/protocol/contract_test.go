@@ -128,6 +128,8 @@ var payloadFactories = map[string]func() any{
 	protocol.TypeChannelPublish: func() any { return &protocol.ChannelPublish{} },
 	protocol.TypeChannelMessage: func() any { return &protocol.ChannelMessage{} },
 	protocol.TypeSignal:         func() any { return &protocol.Signal{} },
+	protocol.TypeIceRequest:     func() any { return &protocol.IceRequest{} },
+	protocol.TypeIceConfig:      func() any { return &protocol.IceConfig{} },
 	protocol.TypeLayerDeclare:   func() any { return &protocol.LayerDeclare{} },
 	protocol.TypeLayerUpdate:    func() any { return &protocol.LayerUpdate{} },
 	protocol.TypeError:          func() any { return &protocol.ErrorMsg{} },

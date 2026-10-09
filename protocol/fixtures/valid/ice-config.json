@@ -1,0 +1,17 @@
+{
+  "v": 0,
+  "type": "ice.config",
+  "ts_ms": 1755100000123,
+  "payload": {
+    "ice_servers": [
+      { "urls": ["stun:turn.example.org:3478"] },
+      {
+        "urls": ["turn:turn.example.org:3478?transport=udp", "turns:turn.example.org:5349?transport=tcp"],
+        "username": "1755103600:o_9c8d7e6f",
+        "credential": "H5hhCnIJ5Q0i88m4zVts9A7C8Sc="
+      }
+    ],
+    "expires_at_ms": 1755103600000,
+    "ref": "ice-1"
+  }
+}
